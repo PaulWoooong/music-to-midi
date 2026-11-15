@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-from importlib import metadata
 import os
-from pathlib import Path
+import platform
 import sys
 import warnings
+from importlib import metadata
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -30,7 +31,18 @@ XPU_RUNTIME_VERSIONS = {
 XPU_HARDWARE_BASELINE = (
     "Intel Arc B-Series (Battlemage) and Intel Core Ultra Series 3 (Panther Lake)"
 )
-CUDA_RUNTIME_VERSIONS = {"onnxruntime-gpu": "1.23.2"}
+
+
+def _cuda_onnxruntime_version() -> str:
+    # Upstream publishes aarch64 onnxruntime-gpu wheels from 1.29 onward; the
+    # x86_64-only 1.23.2 pin cannot be installed on Linux arm64.
+    machine = platform.machine().strip().lower()
+    if sys.platform.startswith("linux") and machine in {"aarch64", "arm64"}:
+        return "1.31.1"
+    return "1.23.2"
+
+
+CUDA_RUNTIME_VERSIONS = {"onnxruntime-gpu": _cuda_onnxruntime_version()}
 
 
 def _distribution_version(name: str) -> str:
@@ -171,9 +183,22 @@ def _validate_torch_xpu(torch) -> tuple[str, str]:
     return device, xpu.get_device_name(0)
 
 
+def _cuda_flavor_mismatches(versions: dict[str, str]) -> dict[str, str]:
+    # The official cu128 aarch64 torchaudio/torchvision wheels carry no local
+    # version tag, while torch itself is still published as ``+cu128``.
+    machine = platform.machine().strip().lower()
+    aarch64_linux = sys.platform.startswith("linux") and machine in {"aarch64", "arm64"}
+    untagged_allowlist = {"torchaudio", "torchvision"} if aarch64_linux else set()
+    return {
+        name: version
+        for name, version in versions.items()
+        if "+cu128" not in version and name not in untagged_allowlist
+    }
+
+
 def _validate_torch_cuda(torch) -> tuple[str, str]:
     versions = _require_distribution_versions(CUDA_PYTORCH_VERSIONS)
-    wrong_flavors = {name: version for name, version in versions.items() if "+cu128" not in version}
+    wrong_flavors = _cuda_flavor_mismatches(versions)
     if wrong_flavors:
         raise RuntimeError(f"Expected PyTorch CUDA 12.8 wheels, got: {wrong_flavors}")
     if getattr(torch.version, "hip", None) is not None:
@@ -195,6 +220,7 @@ def _validate_torch_cuda(torch) -> tuple[str, str]:
 
 def _validate_openvino_gpu_session() -> list[str]:
     import numpy as np
+
     from src.utils.openvino_runtime import initialize_openvino_gpu_runtime
 
     initialize_openvino_gpu_runtime()

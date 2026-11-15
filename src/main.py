@@ -32,6 +32,15 @@ def _is_cli_runtime() -> bool:
 
 _IS_WEB_API_RUNTIME = _is_web_api_runtime()
 
+# Torch's Inductor worker pool starts helpers with
+# ``subprocess.Popen([sys.executable, .../compile_worker/__main__.py])``.
+# Inside a Linux PyInstaller bundle ``sys.executable`` is MusicToMidi itself,
+# so the helper reopens the desktop app instead of running the worker and the
+# parent waits forever at exit.  Compile in-process for frozen Linux builds;
+# the flag only bounds Inductor's parallelism, not its generated code.
+if getattr(sys, "frozen", False) and sys.platform.startswith("linux"):
+    os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+
 if __name__ == "__main__":
     # Source runs must be stopped before importing GUI/runtime dependencies when
     # a global or foreign Python environment would leak incompatible packages.
@@ -360,6 +369,22 @@ def _run_gui_runtime_self_test() -> int:
             raise RuntimeError(
                 f"Packaged ONNX Runtime did not expose {expected_provider}: " + ", ".join(providers)
             )
+        if accelerator == "cuda":
+            # Beat This and other audio front ends take abs() of complex STFT
+            # tensors, which PyTorch JIT-compiles with NVRTC.  Exercise that
+            # path so a mismatched NVRTC (e.g. sm_121 vs CUDA 12.8) fails here
+            # instead of during the first user conversion.
+            import torch
+
+            try:
+                probe = torch.randn(16, dtype=torch.complex64, device=device)
+                probe.abs().sum().item()
+            except Exception as exc:
+                detail = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+                raise RuntimeError(
+                    "CUDA runtime-compiled kernel check failed (NVRTC cannot target "
+                    f"{device}): {detail}"
+                ) from exc
         logger.info(
             "GUI runtime self-test passed: accelerator=%s device=%s providers=%s",
             accelerator,

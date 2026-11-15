@@ -7,13 +7,17 @@ silently substitutes another score renderer.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -40,12 +44,57 @@ MUSESCORE_WINDOWS_INSTALLER_SHA256 = (
     "41c9ca34fbf0b720f229ed3b0c4ff923b5d41a8c24ad9262e1fce390cd5c34e5"
 )
 
-MUSESCORE_LINUX_APPIMAGE = f"MuseScore-Studio-{MUSESCORE_VERSION}.{MUSESCORE_BUILD}-x86_64.AppImage"
+MUSESCORE_LINUX_RELEASES = {
+    "x86_64": {
+        "appimage": f"MuseScore-Studio-{MUSESCORE_VERSION}.{MUSESCORE_BUILD}-x86_64.AppImage",
+        "bytes": 192_616_952,
+        "sha256": "5fcbd1f292270eca5c3867d56b767c31a173a155216a415f5caee22553f8e7a6",
+    },
+    "aarch64": {
+        "appimage": f"MuseScore-Studio-{MUSESCORE_VERSION}.{MUSESCORE_BUILD}-aarch64.AppImage",
+        "bytes": 188_541_448,
+        "sha256": "e16c4e307f786ed7720d9d4d244213b6640d7e82ecbeb930959964c594f6ea04",
+    },
+}
+_LINUX_ARCH_ALIASES = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
+
+
+def _host_linux_architecture() -> str:
+    machine = platform.machine().strip().lower()
+    return _LINUX_ARCH_ALIASES.get(machine, machine)
+
+
+def _linux_release_for_current_host() -> dict[str, object]:
+    architecture = _host_linux_architecture()
+    release = MUSESCORE_LINUX_RELEASES.get(architecture)
+    if release is None:
+        supported = ", ".join(sorted(MUSESCORE_LINUX_RELEASES))
+        raise MuseScoreRuntimeError(
+            f"Automatic MuseScore runtime preparation supports Linux {supported}; "
+            f"detected {architecture or 'unknown'}. Install MuseScore Studio 4 and set "
+            f"{MUSESCORE_ENV_VAR}."
+        )
+    return release
+
+
+MUSESCORE_LINUX_ARCH = _host_linux_architecture()
+# Module-level constants describe the current host and remain available to
+# callers and packaging code.  Unknown architectures fall back to the x86_64
+# metadata; download_musescore_runtime() refuses them explicitly.
+_MUSESCORE_LINUX_HOST_RELEASE = MUSESCORE_LINUX_RELEASES.get(
+    MUSESCORE_LINUX_ARCH, MUSESCORE_LINUX_RELEASES["x86_64"]
+)
+MUSESCORE_LINUX_APPIMAGE = str(_MUSESCORE_LINUX_HOST_RELEASE["appimage"])
 MUSESCORE_LINUX_URL = (
     f"https://ftp.osuosl.org/pub/musescore-nightlies/linux/4x/stable/{MUSESCORE_LINUX_APPIMAGE}"
 )
-MUSESCORE_LINUX_APPIMAGE_BYTES = 192_616_952
-MUSESCORE_LINUX_APPIMAGE_SHA256 = "5fcbd1f292270eca5c3867d56b767c31a173a155216a415f5caee22553f8e7a6"
+MUSESCORE_LINUX_APPIMAGE_BYTES = int(_MUSESCORE_LINUX_HOST_RELEASE["bytes"])
+MUSESCORE_LINUX_APPIMAGE_SHA256 = str(_MUSESCORE_LINUX_HOST_RELEASE["sha256"])
 MUSESCORE_LICENSE_NAME = "LICENSE.txt"
 MUSESCORE_LICENSE_URL = (
     f"https://raw.githubusercontent.com/musescore/MuseScore/{MUSESCORE_SOURCE_REVISION}/"
@@ -292,32 +341,108 @@ def get_musescore_executable() -> Path:
 
 
 def _download_verified(
-    url: str,
+    url: str | tuple[str, ...] | list[str],
     destination: Path,
     *,
     expected_size: int,
     expected_sha256: str,
     printer,
 ) -> None:
-    printer(f"Downloading pinned MuseScore Studio {MUSESCORE_VERSION}: {url}")
-    digest = hashlib.sha256()
-    size = 0
-    request = urllib.request.Request(url, headers={"User-Agent": "music-to-midi"})
-    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as target:
-        while True:
-            block = response.read(1024 * 1024)
-            if not block:
-                break
-            target.write(block)
-            digest.update(block)
-            size += len(block)
-    actual_sha256 = digest.hexdigest()
-    if size != expected_size or actual_sha256 != expected_sha256:
+    urls = (url,) if isinstance(url, str) else tuple(url)
+    failures: list[str] = []
+    for candidate in urls:
+        printer(f"Downloading pinned MuseScore Studio {MUSESCORE_VERSION}: {candidate}")
+        digest = hashlib.sha256()
+        size = 0
+        request = urllib.request.Request(candidate, headers={"User-Agent": "music-to-midi"})
+        try:
+            with (
+                urllib.request.urlopen(request, timeout=60) as response,
+                destination.open("wb") as target,
+            ):
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    target.write(block)
+                    digest.update(block)
+                    size += len(block)
+        except (OSError, urllib.error.URLError) as exc:
+            failures.append(f"{candidate}: {exc}")
+            printer(f"Download mirror unavailable: {candidate}: {exc}")
+            continue
+        actual_sha256 = digest.hexdigest()
+        if size != expected_size or actual_sha256 != expected_sha256:
+            failures.append(
+                f"{candidate}: identity mismatch "
+                f"(expected={expected_size}/{expected_sha256}, "
+                f"actual={size}/{actual_sha256})"
+            )
+            printer(f"Download mirror served an unexpected file: {candidate}")
+            continue
+        return
+    raise MuseScoreRuntimeError(
+        "MuseScore download failed from every configured mirror: " + "; ".join(failures)
+    )
+
+
+def _write_verified_bytes(
+    data: bytes,
+    destination: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    actual_sha256 = hashlib.sha256(data).hexdigest()
+    if len(data) != expected_size or actual_sha256 != expected_sha256:
         raise MuseScoreRuntimeError(
             "MuseScore download identity mismatch: "
-            f"expected={expected_size}/{expected_sha256}, actual={size}/{actual_sha256}, "
+            f"expected={expected_size}/{expected_sha256}, actual={len(data)}/{actual_sha256}, "
             f"path={destination}"
         )
+    destination.write_bytes(data)
+
+
+def _download_license_verified(destination: Path, *, printer) -> None:
+    """Fetch the pinned upstream license, with a GitHub API mirror fallback."""
+
+    try:
+        _download_verified(
+            MUSESCORE_LICENSE_URL,
+            destination,
+            expected_size=MUSESCORE_LICENSE_BYTES,
+            expected_sha256=MUSESCORE_LICENSE_SHA256,
+            printer=printer,
+        )
+        return
+    except MuseScoreRuntimeError as exc:
+        printer(f"License mirror unavailable, trying GitHub contents API: {exc}")
+
+    api_url = (
+        "https://api.github.com/repos/musescore/MuseScore/contents/"
+        f"{MUSESCORE_LICENSE_NAME}?ref={MUSESCORE_SOURCE_REVISION}"
+    )
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "User-Agent": "music-to-midi",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.load(response)
+        data = base64.b64decode(payload["content"])
+    except (OSError, urllib.error.URLError, KeyError, TypeError, ValueError) as exc:
+        raise MuseScoreRuntimeError(
+            f"MuseScore license download failed from every configured mirror: {exc}"
+        ) from exc
+    _write_verified_bytes(
+        data,
+        destination,
+        expected_size=MUSESCORE_LICENSE_BYTES,
+        expected_sha256=MUSESCORE_LICENSE_SHA256,
+    )
 
 
 def _prepare_windows_runtime(temp_root: Path, *, printer) -> Path:
@@ -368,12 +493,18 @@ def _prepare_windows_runtime(temp_root: Path, *, printer) -> Path:
 
 
 def _prepare_linux_runtime(temp_root: Path, *, printer) -> Path:
-    appimage = temp_root / MUSESCORE_LINUX_APPIMAGE
+    release = _linux_release_for_current_host()
+    appimage_name = str(release["appimage"])
+    appimage = temp_root / appimage_name
     _download_verified(
-        MUSESCORE_LINUX_URL,
+        (
+            f"https://ftp.osuosl.org/pub/musescore-nightlies/linux/4x/stable/{appimage_name}",
+            "https://github.com/musescore/MuseScore/releases/download/"
+            f"v{MUSESCORE_VERSION}/{appimage_name}",
+        ),
         appimage,
-        expected_size=MUSESCORE_LINUX_APPIMAGE_BYTES,
-        expected_sha256=MUSESCORE_LINUX_APPIMAGE_SHA256,
+        expected_size=int(release["bytes"]),
+        expected_sha256=str(release["sha256"]),
         printer=printer,
     )
     appimage.chmod(appimage.stat().st_mode | 0o111)
@@ -413,7 +544,8 @@ def download_musescore_runtime(*, printer=print) -> Path:
     if os.name != "nt" and not sys.platform.startswith("linux"):
         raise MuseScoreRuntimeError(
             "Automatic MuseScore runtime preparation currently supports Windows x64 and "
-            "Linux x86_64; install MuseScore Studio 4 and set MUSIC_TO_MIDI_MUSESCORE."
+            "Linux x86_64/aarch64; install MuseScore Studio 4 and set "
+            "MUSIC_TO_MIDI_MUSESCORE."
         )
 
     target_root.parent.mkdir(parents=True, exist_ok=True)
@@ -433,11 +565,8 @@ def download_musescore_runtime(*, printer=print) -> Path:
         staged_executable = (
             staged / "bin" / "MuseScore4.exe" if os.name == "nt" else staged / "AppRun"
         )
-        _download_verified(
-            MUSESCORE_LICENSE_URL,
+        _download_license_verified(
             staged / MUSESCORE_LICENSE_NAME,
-            expected_size=MUSESCORE_LICENSE_BYTES,
-            expected_sha256=MUSESCORE_LICENSE_SHA256,
             printer=printer,
         )
         validate_pinned_musescore_distribution(staged_executable)
@@ -457,6 +586,8 @@ __all__ = [
     "MUSESCORE_LINUX_APPIMAGE",
     "MUSESCORE_LINUX_APPIMAGE_BYTES",
     "MUSESCORE_LINUX_APPIMAGE_SHA256",
+    "MUSESCORE_LINUX_ARCH",
+    "MUSESCORE_LINUX_RELEASES",
     "MUSESCORE_LINUX_URL",
     "MUSESCORE_LICENSE_BYTES",
     "MUSESCORE_LICENSE_NAME",

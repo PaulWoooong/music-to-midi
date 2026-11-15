@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import platform
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -32,7 +33,12 @@ import src.utils.yourmt3_source_identity as yourmt3_source  # noqa: E402
 from src.utils.artifact_identity import validate_file_identity  # noqa: E402
 
 AUDIO_SEPARATOR_PACKAGE_VERSION = "0.44.1"
-ONNXRUNTIME_GPU_PACKAGE_VERSION = "1.23.2"
+# Upstream stopped publishing x86_64-only wheels below 1.29; the arm64 installer
+# pins the first release that ships aarch64 wheels with CUDAExecutionProvider.
+_HOST_ARCH = platform.machine().strip().lower()
+ONNXRUNTIME_GPU_PACKAGE_VERSION = (
+    "1.31.1" if _HOST_ARCH in {"aarch64", "arm64"} else "1.23.2"
+)
 ONNXRUNTIME_OPENVINO_PACKAGE_VERSION = "1.24.1"
 OPENVINO_PACKAGE_VERSION = "2025.4.1"
 

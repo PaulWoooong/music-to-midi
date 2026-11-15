@@ -5,14 +5,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class OneClickScriptContractTests(unittest.TestCase):
-    def test_installers_preflight_gated_models_before_model_bundle(self):
-        for script_name in ("install.ps1", "install.sh"):
-            script = (REPO_ROOT / script_name).read_text(encoding="utf-8")
+    def test_windows_installer_preflights_gated_models_before_model_bundle(self):
+        script = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
 
-            preflight = script.index("preflight_muscriptor_download_access")
-            aggregate_download = script.index("download_sota_models.py")
-            self.assertLess(preflight, aggregate_download)
-            self.assertIn("Small/Medium/Large gated", script)
+        preflight = script.index("preflight_muscriptor_download_access")
+        aggregate_download = script.index("download_sota_models.py")
+        self.assertLess(preflight, aggregate_download)
+        self.assertIn("Small/Medium/Large gated", script)
+
+    def test_linux_installer_uses_local_models_instead_of_gated_preflight(self):
+        script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("preflight_muscriptor_download_access", script)
+        self.assertNotIn("download_sota_models.py", script)
+        self.assertIn("prepare_local_models.py", script)
 
     def test_windows_launcher_checks_aria_amt_package_and_model(self):
         script = (REPO_ROOT / "run.ps1").read_text(encoding="utf-8")
@@ -285,10 +291,12 @@ class OneClickScriptContractTests(unittest.TestCase):
         ):
             self.assertIn(expected, script)
 
-    def test_linux_installer_downloads_aria_amt_model_and_requires_python_311(self):
+    def test_linux_installer_prepares_aria_amt_package_and_copies_local_models(self):
         script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
 
-        self.assertIn("download_aria_amt_model.py", script)
+        self.assertIn("prepare_local_models.py", script)
+        self.assertIn("MUSIC_TO_MIDI_MODELS_SOURCE", script)
+        self.assertNotIn("download_aria_amt_model.py", script)
         self.assertIn("python3.11", script)
         self.assertIn("Aria-AMT", script)
         self.assertIn("music-to-midi-requirements-without-aria-amt.XXXXXX", script)
@@ -324,11 +332,12 @@ class OneClickScriptContractTests(unittest.TestCase):
         self.assertIn("保留不覆盖", script)
         self.assertIn("Music to MIDI managed font fallback", script)
 
-    def test_linux_installer_downloads_bytedance_pedal_model(self):
+    def test_linux_installer_copies_bytedance_pedal_model_from_local_source(self):
         script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
 
-        self.assertIn("download_bytedance_piano_model.py", script)
+        self.assertIn("prepare_local_models.py", script)
         self.assertIn("ByteDance Piano", script)
+        self.assertNotIn("download_bytedance_piano_model.py", script)
 
     def test_linux_installer_reports_dependency_import_failures_under_set_e(self):
         script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
@@ -338,21 +347,33 @@ class OneClickScriptContractTests(unittest.TestCase):
         self.assertNotIn("DEPS_OK", script)
         self.assertIn('error "  ffmpeg 未找到；音频转换所需运行时不完整"', script)
 
-    def test_linux_installer_stops_when_required_model_downloads_fail(self):
+    def test_linux_installer_copies_models_offline_and_stops_when_source_is_missing(self):
         script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
 
         for expected in (
-            'if ! "$PYTHON" "${REPO_DIR}/download_sota_models.py"; then',
-            'error "统一模型集合下载或校验失败"',
-            "download_multistem_model.py",
-            'if ! "$PYTHON" "${REPO_DIR}/download_vocal_model.py"; then',
-            'error "Leap XE vocals model download or verification failed"',
-            'if ! "$PYTHON" "${REPO_DIR}/download_accompaniment_model.py"; then',
-            'error "Leap Instrumental accompaniment model download or verification failed"',
-            'if ! "$PYTHON" "${REPO_DIR}/download_transkun_v2_aug_model.py"; then',
-            'error "TransKun V2 Aug model download or verification failed"',
+            'MODELS_SOURCE="${MUSIC_TO_MIDI_MODELS_SOURCE:-${HOME}/models}"',
+            'if [ ! -d "$MODELS_SOURCE" ]; then',
+            "prepare_local_models.py",
+            "--check-only",
+            '--source "$MODELS_SOURCE"',
+            'error "本地模型目录结构预检失败；安装器不会联网下载模型。"',
+            'error "本地模型复制或离线校验失败；安装器不会回退到联网下载。"',
+            "download_musescore_runtime.py",
         ):
             self.assertIn(expected, script)
+
+        for forbidden in (
+            "download_sota_models.py",
+            "download_beat_this_model.py",
+            "download_multistem_model.py",
+            "download_vocal_model.py",
+            "download_accompaniment_model.py",
+            "download_transkun_v2_aug_model.py",
+            "download_bytedance_piano_model.py",
+            "download_aria_amt_model.py",
+            "download_miros_model.py",
+        ):
+            self.assertNotIn(forbidden, script)
 
         self.assertNotIn("vocal_rvc ensemble", script)
         self.assertNotIn("karaoke ensemble", script)
@@ -360,12 +381,12 @@ class OneClickScriptContractTests(unittest.TestCase):
         self.assertNotIn("Press Ctrl+C to skip", script)
         self.assertNotIn("可稍后手动运行", script)
 
-    def test_linux_installer_prepares_miros_without_masking_failures(self):
+    def test_linux_installer_prepares_miros_from_local_source_without_masking_failures(self):
         script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
 
-        self.assertIn("download_miros_model.py", script)
-        self.assertIn("MirosTranscriber.is_model_available()", script)
+        self.assertIn("prepare_local_models.py", script)
         self.assertIn("MIROS", script)
+        self.assertNotIn("download_miros_model.py", script)
         self.assertNotIn("MIROS download failed", script)
 
     def test_project_requires_python_matches_aria_amt_requirement(self):

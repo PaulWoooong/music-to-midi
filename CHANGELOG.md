@@ -1,5 +1,16 @@
 # 更新说明 / Changelog
 
+## 未发布 / Unreleased
+
+- 新增 Linux arm64（aarch64，含 NVIDIA GB10 / DGX Spark）原生源码安装支持：`install.sh` 按 `uname -m` 自动选择架构相关依赖，并使用官方 `onnxruntime-gpu==1.31.1`、源码构建的 `diffq==0.2.4` 与 MuseScore Studio 4.7.6 aarch64 AppImage；MuseScore 下载增加 GitHub Release 与许可证镜像回退。x86_64 与 Windows 流程保持不变，Docker 仍只发布 `linux/amd64`。
+- Linux 安装流程不再联网下载模型：`install.sh` 调用新增的 `prepare_local_models.py`，从 `MUSIC_TO_MIDI_MODELS_SOURCE`（默认 `~/models`）的缓存镜像目录合并复制全部必需权重，并用 `inspect_model_profiles` 与 ChordMini 身份校验做严格离线验证。缺少任一必需模型时立即停止，不回退到网络下载；MuScriptor gated 预检因此从 Linux 安装器移除。Windows 下载流程、Docker 与手动维护命令保持不变。
+- 修复 aarch64 / NVIDIA GB10（sm_121）上的节拍检测崩溃：PyTorch 2.7 的 cu128 wheel 自带 NVRTC 12.8，无法为 sm_121 编译 jiterator 内核，Beat This 的 torchaudio 幅度谱（复数 `abs`）因此报 `nvrtc: error: invalid value for --gpu-architecture (-arch)`。Linux arm64 CUDA 便携包现在改用 CUDA 13 NVRTC（保持 `libnvrtc.so.12` ABI 名称），`MusicToMidi.spec` 在收集后自动应用，源码安装的 venv 同样处理；`--self-test-gui-runtime` 新增复数 `abs` 运行时编译探测，x86_64/Windows 流程不变。
+- 修复 Linux 冻结包中 `torch.compile` 的并行编译 worker 无法启动、导致进程退出或首次推理永久等待的问题：Inductor 通过 `sys.executable` 拉起 `compile_worker`，在 PyInstaller 包内会重新启动主程序。冻结的 Linux 构建现在设置 `TORCHINDUCTOR_COMPILE_THREADS=1`，改为进程内编译。
+- Fixed frozen Linux bundles hanging on exit or first inference because Inductor's parallel compile workers are launched through `sys.executable`, which reopens the desktop app inside a PyInstaller bundle. Frozen Linux builds now set `TORCHINDUCTOR_COMPILE_THREADS=1` and compile in-process.
+- Fixed the beat-tracking crash on aarch64 / NVIDIA GB10 (sm_121): PyTorch 2.7's cu128 wheel bundles NVRTC 12.8, which cannot compile jiterator kernels for sm_121, so Beat This failed in torchaudio's magnitude spectrogram (complex `abs`) with `nvrtc: error: invalid value for --gpu-architecture (-arch)`. Linux arm64 CUDA bundles now use the CUDA 13 NVRTC under the existing `libnvrtc.so.12` ABI name, applied automatically after collection by `MusicToMidi.spec`, and the source-install venv receives the same treatment; `--self-test-gui-runtime` now exercises a runtime-compiled complex `abs` kernel. x86_64/Windows flows are unchanged.
+- Added native Linux arm64 (aarch64, including NVIDIA GB10 / DGX Spark) source-install support. `install.sh` now selects architecture-specific dependencies from `uname -m`, uses official `onnxruntime-gpu==1.31.1`, source-built `diffq==0.2.4`, and the MuseScore Studio 4.7.6 aarch64 AppImage, with GitHub Release and license mirror fallbacks for MuseScore downloads. x86_64 and Windows flows are unchanged; Docker images remain `linux/amd64` only.
+- The Linux installer no longer downloads models. `install.sh` now calls the new `prepare_local_models.py`, which merges every required weight from the cache mirror at `MUSIC_TO_MIDI_MODELS_SOURCE` (default `~/models`) and performs a strict offline validation with `inspect_model_profiles` plus the ChordMini identity check. Missing assets stop installation immediately with no network fallback; the MuScriptor gated preflight is therefore removed from the Linux installer. Windows download flows, Docker, and manual maintenance commands are unchanged.
+
 ## v1.10.0 — 2026-10-24
 
 ### 统一发布 / Unified release

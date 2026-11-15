@@ -177,9 +177,9 @@ Current synchronization coverage:
 
 | Location | Synced Content | Notes |
 |----------|----------------|-------|
-| `download_sota_models.py` | Prepares Beat This `final0`; all five official YourMT3+ checkpoints; pinned MIROS source plus both weights; MuScriptor Large / Medium / Small; `BS-Rofo-SW-Fixed.ckpt`; Leap XE; Leap Instrumental; TransKun V2 Aug; Aria-AMT; ByteDance; MuseScore General SoundFont; FluidSynth; and pinned MuseScore Studio 4.7.6 | Fixed-source resources are validated by known size/SHA256 or their explicit source/runtime identity; any required-resource failure stops the command. |
+| `download_sota_models.py` | Prepares Beat This `final0`; all five official YourMT3+ checkpoints; pinned MIROS source plus both weights; MuScriptor Large / Medium / Small; `BS-Rofo-SW-Fixed.ckpt`; Leap XE; Leap Instrumental; TransKun V2 Aug; Aria-AMT; ByteDance; MuseScore General SoundFont; FluidSynth; and pinned MuseScore Studio 4.7.6 | Fixed-source resources are validated by known size/SHA256 or their explicit source/runtime identity; any required-resource failure stops the command. Used by Windows, portable, and manual flows; Linux `install.sh` uses `prepare_local_models.py` to copy the local cache mirror instead. |
 | `run.ps1` / `run_xpu.ps1` / `run.sh` | Checks actual accelerator execution, all official YourMT3+ modes, MuScriptor Large / Medium / Small, BS-RoFormer SW Fixed, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance Pedal, MIROS, SoundFont, FluidSynth, and separator availability before launch | Missing or invalid required resources and CPU fallback are reported explicitly. |
-| `install.ps1` / `install_xpu.ps1` / `install.sh` | Installs an isolated NVIDIA PyTorch 2.7 or Intel XPU PyTorch 2.11 runtime, NumPy 1.26, audio-separator 0.44.1, the identity-verified official MuScriptor v0.4.0 runtime, and every required model/runtime asset | NVIDIA uses `venv` + CUDA 12.8; Windows Intel uses `venv-xpu` + native PyTorch XPU + OpenVINO GPU. Mixed runtimes are rejected. |
+| `install.ps1` / `install_xpu.ps1` / `install.sh` | Installs an isolated NVIDIA PyTorch 2.7 or Intel XPU PyTorch 2.11 runtime, NumPy 1.26, audio-separator 0.44.1, the identity-verified official MuScriptor v0.4.0 runtime, and every required model/runtime asset | NVIDIA uses `venv` + CUDA 12.8; Windows Intel uses `venv-xpu` + native PyTorch XPU + OpenVINO GPU. Mixed runtimes are rejected. Windows installers download and verify models; Linux `install.sh` only copies the local cache mirror from `MUSIC_TO_MIDI_MODELS_SOURCE` (default `~/models`) and validates it offline, stopping when anything is missing. |
 | `.github/workflows/build.yml` | Push/PR jobs run Linux and Windows source, test, and packaging checks only | These jobs do not produce a portable package. Bundle validation requires complete model files with matching identities. |
 | `.github/workflows/release.yml` | The complete portable-build pipeline; it downloads and strictly verifies every YourMT3+, separator, MIROS, MuScriptor, TransKun, Aria-AMT, ByteDance, playback, engraving, and runtime asset | The 31-component gate currently records 26 `VERIFIED`, five explicitly documented `OWNER_ACCEPTED` items and no `BLOCKED` items; Leap Instrumental has its own maintainer distribution record. The target GPU runtime is PyTorch 2.7 + CUDA 12.8; an owner acceptance is a revocable distribution decision, not a claim that upstream granted a license. |
 | `colab_notebook.ipynb` | Keeps Colab's preinstalled Torch, installs pinned Web/runtime dependencies, and synchronizes all seven modes | `SMART` and the per-track workbench expose YourMT3+, MIROS, and MuScriptor Large / Medium / Small; the per-track menu contains 13 routes in total. |
@@ -239,7 +239,7 @@ The exact files depend on the selected mode and the per-track conversions the us
 
 ### YourMT3+
 
-YourMT3+ is the default multi-instrument backend. `download_sota_models.py` prepares Beat This `final0`, all five official YourMT3+ checkpoints, pinned MIROS source and both weights, MuScriptor Large / Medium / Small, `BS-Rofo-SW-Fixed.ckpt`, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance, MuseScore General SoundFont, FluidSynth, and pinned MuseScore Studio 4.7.6, and strictly validates the default TransKun 2.0.1 package and bundled V2 resources. YourMT3 inference imports the repository-controlled `YourMT3/amt/src` tree through `src/core/yourmt3_transcriber.py`.
+YourMT3+ is the default multi-instrument backend. On Windows, `download_sota_models.py` prepares Beat This `final0`, all five official YourMT3+ checkpoints, pinned MIROS source and both weights, MuScriptor Large / Medium / Small, `BS-Rofo-SW-Fixed.ckpt`, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance, MuseScore General SoundFont, FluidSynth, and pinned MuseScore Studio 4.7.6, and strictly validates the default TransKun 2.0.1 package and bundled V2 resources. Linux `install.sh` never downloads model weights; `prepare_local_models.py` copies the same assets from a local cache mirror and validates them offline. YourMT3 inference imports the repository-controlled `YourMT3/amt/src` tree through `src/core/yourmt3_transcriber.py`.
 
 The source runtime depends on:
 
@@ -251,13 +251,23 @@ YourMT3/amt/src/config/config.py
 
 The complete project checkout includes a compatibility-patched `YourMT3/amt/src` tree protected by a fixed manifest. When it is missing, the supported recovery source is the current project revision. Mutable upstream `master` is suitable for a separate experiment but does not satisfy this project's three-interface source-parity or portable-build identity contract.
 
-Model-weight command:
+Model-weight preparation:
 
 The source-maintenance commands below use the repository's `venv`. Without activation, the complete paths are `.\venv\Scripts\python.exe` / `.\venv\Scripts\hf.exe` on Windows and `./venv/bin/python` / `./venv/bin/hf` on Linux/WSL2. A global Python interpreter is outside the supported source runtime.
+
+Windows and manual download flows use:
 
 ```bash
 python download_sota_models.py
 ```
+
+Linux installers only copy from a local cache mirror and never contact model hosts:
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
+
+The source defaults to `~/models` and can be overridden with `MUSIC_TO_MIDI_MODELS_SOURCE`. The required mirror layout and offline validation rules are documented in [Linux / WSL2](#linux--wsl2).
 
 Default model search roots include:
 
@@ -523,10 +533,12 @@ Each platform has its own pinned compatibility envelope; cross-platform NumPy/To
 |----------|----------------|-----------------------|----------------|
 | Windows / NVIDIA desktop and portable target | Python 3.11-3.12; Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4; CUDA 12.8 wheels | Source launchers verify this combination; `release.yml` revalidates the closed third-party inventory, exact model identities, and finished portable smoke tests before publishing |
 | Windows / Intel XPU desktop and local portable target | Python 3.11-3.12; native Torch 2.11.0 XPU / torchaudio 2.11.0 XPU / torchvision 0.26.0 XPU | NumPy 1.26.4; `onnxruntime-openvino==1.24.1` + `openvino==2025.4.1`; the startup gate verifies FFT/STFT, BF16, and matrix probes remain on XPU, while the new Leap Instrumental uses PyTorch FP32 and has not yet been validated on XPU hardware | The newest coherent PyTorch XPU trio covers Arc B-Series (Battlemage) and Core Ultra Series 3 (Panther Lake) in the official hardware matrix; Panther Lake requires Windows 11. Uses isolated `venv-xpu`; IPEX, CUDA ORT mixing, and CPU EP fallback are rejected. Official GitHub releases remain CUDA-only for now |
-| Linux / NVIDIA source | Python 3.11+; Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4; NVIDIA driver compatible with CUDA 12.8; `cu128` only | `install.sh` / `run.sh` verify the complete seven-mode runtime; `build.yml` performs source, test, and packaging checks only |
+| Linux / NVIDIA source | Python 3.11-3.12 on x64 or arm64; Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4; NVIDIA driver compatible with CUDA 12.8; `cu128` only; arm64 uses onnxruntime-gpu 1.31.1 and a source-built diffq 0.2.4 | `install.sh` / `run.sh` verify the complete seven-mode runtime; `build.yml` performs source, test, and packaging checks only |
 | Linux / AMD/ROCm | No complete seven-mode compatibility runtime | This replacement does not extend the validated hardware range | Currently unsupported; the installer stops with a compatibility error |
 | Hugging Face Space | Python 3.12.12; Torch 2.8.0 / torchaudio 2.8.0 / torchvision 0.23.0 | NumPy `>=2,<2.5`; ZeroGPU | Uses `space/requirements.txt`; the desktop NumPy 1.26 pin is not part of the Space compatibility set |
 | Google Colab | Current Colab Python and preinstalled Torch | Keeps preinstalled Torch; installs only pinned Web/runtime dependencies | Avoids replacing Torch and breaking its CUDA runtime |
+
+Linux arm64 (for example NVIDIA GB10 / DGX Spark) uses the same `install.sh` as x86_64. The installer selects architecture-specific dependencies from `uname -m`: the official Torch `cu128` aarch64 wheels, `onnxruntime-gpu==1.31.1`, a source-built `diffq==0.2.4`, and the MuseScore Studio 4.7.6 aarch64 AppImage. `diffq-fixed` and `onnxruntime-gpu==1.23.2` have no aarch64 wheels and remain x86_64-only. Docker images are still published for `linux/amd64` only.
 
 The supported Windows source location is a local-disk, plain-ASCII path with no spaces:
 
@@ -582,12 +594,49 @@ On XPU, Leap XE retains the official full approximately 20-second audio window, 
 
 ### Linux / WSL2
 
+The Linux installer never downloads model weights. Put the pre-downloaded models in a local cache-mirror directory first (default `~/models`), then start the launcher or installer:
+
 ```bash
+export MUSIC_TO_MIDI_MODELS_SOURCE="$HOME/models"   # optional; this is the default
 chmod +x run.sh
 ./run.sh
 ```
 
-`run.sh` checks the virtual environment, core imports, Beat This `final0`, YourMT3+ source and all five model modes, MuScriptor Large / Medium / Small, BS-RoFormer SW Fixed, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance Pedal, MIROS, SoundFont, and FluidSynth, then calls `install.sh` if something is missing or invalid.
+The local layout is shown below. Every listed model is required; installation stops immediately when one is missing:
+
+```text
+${MUSIC_TO_MIDI_MODELS_SOURCE}/
+  music_ai_models/
+    aria_amt/
+    bytedance_piano/
+    yourmt3_all/
+    transkun_v2_aug/
+    chordmini/
+    musescore/                  # optional; reused when present, otherwise prepared as a runtime
+    fluidsynth/                 # optional; Windows-only runtime cache
+  music-to-midi/
+    models/
+      audio-separator/
+      beat_this/
+  huggingface/
+    hub/
+      models--MuScriptor--muscriptor-large/
+      models--MuScriptor--muscriptor-medium/
+      models--MuScriptor--muscriptor-small/
+      models--MuScriptor--assets/
+  ai4m-miros/                   # must contain main.py and transcribe.py
+  yourmt3/                      # optional metadata/temporary cache
+```
+
+You can run the copy and offline verification on its own; missing files are never fetched from the network:
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
+
+Copies are merged, so unrelated files already present in the destination caches are preserved. Only `models/` is copied from `music-to-midi/`, so logs and project data are never imported; only the three MuScriptor weight repositories and the SoundFont asset repository are copied from `huggingface/`, avoiding unrelated models. MuseScore Studio and FluidSynth are treated as runtimes: an existing local cache is reused, and the official MuseScore runtime may still be prepared when its cache is absent.
+
+`run.sh` checks the virtual environment, core imports, Beat This `final0`, YourMT3+ source and all five model modes, MuScriptor Large / Medium / Small, BS-RoFormer SW Fixed, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance Pedal, MIROS, SoundFont, and FluidSynth, then calls `install.sh` if something is missing or invalid; that installer copies from the local directory and validates again.
 
 ### Direct Source Run
 
@@ -672,6 +721,12 @@ python download_sota_models.py
 ```
 
 The repository already includes the controlled, compatibility-patched `YourMT3/amt/src`; mutable upstream `master` does not satisfy its source-identity check. `download_sota_models.py` prepares Beat This `final0`, all five official YourMT3+ checkpoints, pinned MIROS source and both weights, MuScriptor Large / Medium / Small, `BS-Rofo-SW-Fixed.ckpt`, Leap XE, Leap Instrumental, TransKun V2 Aug, Aria-AMT, ByteDance, MuseScore General SoundFont, FluidSynth, and pinned MuseScore Studio 4.7.6, and strictly verifies the default TransKun 2.0.1 package and bundled V2 resources.
+
+The Linux one-click installer does not use that download command; it copies the local cache mirror instead:
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
 
 ### 5. Prepare Separation and Piano Models
 
@@ -864,6 +919,7 @@ src/
 
 space/app.py                 # Gradio Web UI
 colab_notebook.ipynb         # Colab entry
+prepare_local_models.py      # Linux: copy every model from a local cache mirror and verify offline
 download_sota_models.py      # Beat This + five YourMT3 + MIROS + three MuScriptor + separation + four piano + playback assets
 download_vocal_model.py      # Leap XE vocals asset download
 download_accompaniment_model.py # Leap Instrumental accompaniment asset download

@@ -156,7 +156,7 @@ song_other.wav
 
 ### YourMT3+
 
-YourMT3+ 是默认多乐器后端。`download_sota_models.py` 会准备 Beat This `final0`、五种官方 YourMT3+ checkpoint、固定 MIROS 源码与两组权重、MuScriptor Large / Medium / Small、`BS-Rofo-SW-Fixed.ckpt`、Leap XE、Leap Instrumental、TransKun V2 Aug、Aria-AMT、ByteDance、MuseScore General SoundFont、FluidSynth 与固定 MuseScore Studio 4.7.6，并严格校验默认 TransKun 2.0.1 包及其内置 V2 资源；YourMT3 推理通过 `src/core/yourmt3_transcriber.py` 调用仓库内受控的 `YourMT3/amt/src` 源码。
+YourMT3+ 是默认多乐器后端。Windows 的 `download_sota_models.py` 会准备 Beat This `final0`、五种官方 YourMT3+ checkpoint、固定 MIROS 源码与两组权重、MuScriptor Large / Medium / Small、`BS-Rofo-SW-Fixed.ckpt`、Leap XE、Leap Instrumental、TransKun V2 Aug、Aria-AMT、ByteDance、MuseScore General SoundFont、FluidSynth 与固定 MuseScore Studio 4.7.6，并严格校验默认 TransKun 2.0.1 包及其内置 V2 资源；Linux `install.sh` 不联网下载模型，而由 `prepare_local_models.py` 从本地缓存镜像复制同一组资源并离线校验。YourMT3 推理通过 `src/core/yourmt3_transcriber.py` 调用仓库内受控的 `YourMT3/amt/src` 源码。
 
 需要满足：
 
@@ -168,13 +168,23 @@ YourMT3/amt/src/config/config.py
 
 完整项目 checkout 已包含经过兼容补丁并由固定 manifest 校验的 `YourMT3/amt/src`。该目录缺失时，受支持的恢复来源是当前项目版本中的受控源码；可变的上游 `master` 只适合独立实验，不满足三端源码一致性和便携构建身份契约。
 
-模型权重下载：
+模型权重准备：
 
 以下源码维护命令以仓库内 `venv` 为运行环境；未激活时，Windows 的完整解释器路径是 `.\venv\Scripts\python.exe` / `.\venv\Scripts\hf.exe`，Linux/WSL2 为 `./venv/bin/python` / `./venv/bin/hf`。全局 Python 不属于受支持的源码运行环境。
+
+Windows 与手动下载流程使用：
 
 ```bash
 python download_sota_models.py
 ```
+
+Linux 安装器只从本地缓存镜像复制，不访问模型站点：
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
+
+默认来源是 `~/models`，可用 `MUSIC_TO_MIDI_MODELS_SOURCE` 覆盖。所需目录结构与离线校验规则见 [Linux / WSL2](#linux--wsl2)。
 
 默认搜索模型位置包括：
 
@@ -391,7 +401,7 @@ YourMT3+ 和 MIROS 保留官方 writer 的音符输出，并补充速度信息�
 | vocals 模型 | [BS-RoFormer Leap XE](https://huggingface.co/pcunwa/BS-Roformer-Leap)：`Xe/bs_leap_xe_voc.ckpt` + `Xe/leap_xe_config_voc.yaml` |
 | accompaniment 模型 | [BS-RoFormer Leap Instrumental](https://huggingface.co/pcunwa/BS-Roformer-Leap/tree/4e47d6662ae82eaa8b4ac4329fe66099a843b48e)：`bs_roformer_leap_inst.ckpt` + 原始 `bs_leap_inst_conf.yaml`，大小与 SHA-256 严格校验 |
 | 运行方式 | 两路均使用 PyTorch 与 audio-separator；Leap Instrumental 使用该库原生 FP32 demix，直接输出 other 伴奏轨 |
-| 模型准备 | `download_sota_models.py` 会准备并校验两组资源；也可分别运行 `download_vocal_model.py` 与 `download_accompaniment_model.py` |
+| 模型准备 | Windows 由 `download_sota_models.py` 准备并校验两组资源，也可分别运行 `download_vocal_model.py` 与 `download_accompaniment_model.py`；Linux `install.sh` 由 `prepare_local_models.py` 从 `MUSIC_TO_MIDI_MODELS_SOURCE`（默认 `~/models`）复制并离线校验 |
 | 打包行为 | 打包契约包含两组 Leap 资源；Leap Instrumental 已有独立 `OWNER_ACCEPTED` 分发记录，完整包继续执行严格发布校验。运行时缺模型或校验失败会明确报错 |
 | 输出选项 | 分离阶段输出规范的 `vocals` 与 `accompaniment` WAV；逐轨 MIDI 仅在用户勾选路线并点击转换后生成，不自动合并 |
 
@@ -501,10 +511,12 @@ YourMT3+ 和 MIROS 保留官方 writer 的音符输出，并补充速度信息�
 |------|----------------|---------------------|----------|
 | Windows / NVIDIA 桌面与便携目标 | Python 3.11-3.12；Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4；CUDA 12.8 wheel | 源码与便携发布均按此契约校验；`release.yml` 同时执行第三方许可闭集门禁、模型身份校验和成品烟测 |
 | Windows / Intel XPU 桌面与本地便携目标 | Python 3.11-3.12；原生 Torch 2.11.0 XPU / torchaudio 2.11.0 XPU / torchvision 0.26.0 XPU | NumPy 1.26.4；`onnxruntime-openvino==1.24.1` + `openvino==2025.4.1`；启动门禁验证 FFT/STFT、BF16 与矩阵运算驻留 XPU，新 Leap Instrumental 使用 PyTorch FP32，尚未完成 XPU 实机验收 | 最新完整三件套覆盖 PyTorch 官方矩阵中的 Arc B-Series（Battlemage）与 Core Ultra Series 3（Panther Lake）；Panther Lake 要求 Windows 11。运行环境为独立 `venv-xpu`；IPEX、CUDA ORT 混装和 CPU EP 回退会被门禁拒绝。官方 GitHub release 暂仍只构建 CUDA 包 |
-| Linux / NVIDIA 源码运行 | Python 3.11+；Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4；NVIDIA 驱动兼容 CUDA 12.8；仅 `cu128` | `install.sh` / `run.sh` 对完整七模式执行精确运行时校验；`build.yml` 只做源码、测试和打包契约检查 |
+| Linux / NVIDIA 源码运行 | Python 3.11-3.12 x64 或 arm64；Torch 2.7.0 / torchaudio 2.7.0 / torchvision 0.22.0 | NumPy 1.26.4；NVIDIA 驱动兼容 CUDA 12.8；仅 `cu128`；arm64 使用 onnxruntime-gpu 1.31.1 与源码构建的 diffq 0.2.4 | `install.sh` / `run.sh` 对完整七模式执行精确运行时校验；`build.yml` 只做源码、测试和打包契约检查 |
 | Linux / AMD/ROCm | 不提供完整七模式兼容运行时 | 本次替换没有扩大已验证的硬件范围 | 当前不支持；安装脚本会停止并说明兼容性问题 |
 | Hugging Face Space | Python 3.12.12；Torch 2.8.0 / torchaudio 2.8.0 / torchvision 0.23.0 | NumPy `>=2,<2.5`；ZeroGPU | 使用 `space/requirements.txt`；桌面 NumPy 1.26 不属于 Space 兼容组合 |
 | Google Colab | Colab 当前预装 Python/Torch | 保留预装 Torch；只安装 pinned Web/runtime 依赖 | 避免替换 Torch 导致 CUDA 运行库冲突 |
+
+Linux arm64（例如 NVIDIA GB10 / DGX Spark）与 x86_64 共用同一个 `install.sh`。安装器按 `uname -m` 自动选择架构相关依赖：Torch `cu128` 官方 aarch64 wheel、`onnxruntime-gpu==1.31.1`、源码构建的 `diffq==0.2.4`，以及 MuseScore Studio 4.7.6 的 aarch64 AppImage。`diffq-fixed` 与 `onnxruntime-gpu==1.23.2` 没有 aarch64 wheel，因此只保留给 x86_64。Docker 镜像仍只发布 `linux/amd64`。
 
 Windows 源码版应放在本机磁盘的纯英文、无空格目录，例如：
 
@@ -566,12 +578,49 @@ Leap XE 在 XPU 上保留官方完整约 20 秒音频窗口、全部 key/value�
 
 ### Linux / WSL2
 
+Linux 安装器不会从互联网下载模型权重。请先把预下载的模型按缓存镜像结构放到本地目录（默认 `~/models`），再运行启动器或安装器：
+
 ```bash
+export MUSIC_TO_MIDI_MODELS_SOURCE="$HOME/models"   # 可省略，默认就是 ~/models
 chmod +x run.sh
 ./run.sh
 ```
 
-`run.sh` 会检查虚拟环境、核心依赖、Beat This `final0`、YourMT3+ 源码与五种模型模式、MuScriptor Large / Medium / Small、BS-RoFormer SW Fixed、Leap XE、Leap Instrumental、TransKun V2 Aug、Aria-AMT、ByteDance Pedal、MIROS、SoundFont 与 FluidSynth；资源缺失或校验失败时会调用 `install.sh`。
+本地目录结构如下；所有列出的模型都是必需的，缺少任意一项时安装立即停止：
+
+```text
+${MUSIC_TO_MIDI_MODELS_SOURCE}/
+  music_ai_models/
+    aria_amt/
+    bytedance_piano/
+    yourmt3_all/
+    transkun_v2_aug/
+    chordmini/
+    musescore/                  # 可选；存在时直接复用，缺失时安装器准备官方运行时
+    fluidsynth/                 # 可选；仅 Windows 运行时缓存
+  music-to-midi/
+    models/
+      audio-separator/
+      beat_this/
+  huggingface/
+    hub/
+      models--MuScriptor--muscriptor-large/
+      models--MuScriptor--muscriptor-medium/
+      models--MuScriptor--muscriptor-small/
+      models--MuScriptor--assets/
+  ai4m-miros/                   # 含 main.py 与 transcribe.py
+  yourmt3/                      # 可选元数据/临时缓存
+```
+
+可单独执行复制与离线校验；不会联网补全缺失文件：
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
+
+复制采用合并方式：目标缓存中已有的其他文件不会被删除。`music-to-midi/` 只复制 `models/`，不会带入日志或项目数据；`huggingface/` 只复制 MuScriptor 的三个权重仓库与 SoundFont 资产仓库，避免带入无关模型。MuseScore Studio 与 FluidSynth 按运行时处理：本地缓存存在时直接复用，MuseScore 缺失时仍可准备官方运行时。
+
+`run.sh` 会检查虚拟环境、核心依赖、Beat This `final0`、YourMT3+ 源码与五种模型模式、MuScriptor Large / Medium / Small、BS-RoFormer SW Fixed、Leap XE、Leap Instrumental、TransKun V2 Aug、Aria-AMT、ByteDance Pedal、MIROS、SoundFont 与 FluidSynth；资源缺失或校验失败时会调用 `install.sh`，由它从本地目录复制并重新校验。
 
 ### 源码直接运行
 
@@ -656,6 +705,12 @@ python download_sota_models.py
 ```
 
 当前仓库已经包含受控且经过兼容补丁的 `YourMT3/amt/src`；可变上游 `master` 不满足这里的源码身份校验。`download_sota_models.py` 会准备 Beat This `final0`、五种官方 YourMT3+ checkpoint、固定 MIROS 源码与两组权重、MuScriptor Large / Medium / Small、`BS-Rofo-SW-Fixed.ckpt`、Leap XE、Leap Instrumental、TransKun V2 Aug、Aria-AMT、ByteDance、MuseScore General SoundFont、FluidSynth 与固定 MuseScore Studio 4.7.6，并严格校验默认 TransKun 2.0.1 包及其内置 V2 资源。
+
+Linux 一键安装不使用上述下载命令，而是从本地缓存镜像复制：
+
+```bash
+./venv/bin/python prepare_local_models.py --source "${MUSIC_TO_MIDI_MODELS_SOURCE:-$HOME/models}"
+```
 
 ### 5. 准备分离与钢琴模型
 
@@ -846,6 +901,7 @@ src/
 
 space/app.py                 # Gradio Web 界面
 colab_notebook.ipynb         # Colab 运行入口
+prepare_local_models.py      # Linux 从本地缓存镜像复制全部模型并离线校验
 download_sota_models.py      # Beat This + 五种 YourMT3 + MIROS + 三档 MuScriptor + 三种分离 + 四条钢琴 + 播放资产
 download_vocal_model.py      # Leap XE vocals 模型下载
 download_accompaniment_model.py # Leap Instrumental accompaniment 下载入口

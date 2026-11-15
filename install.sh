@@ -24,6 +24,21 @@ echo "║        支持 Linux / WSL2                     ║"
 echo "╚══════════════════════════════════════════════╝"
 echo -e "${NC}"
 
+# ───────────────────────── 检测 CPU 架构 ─────────────────────────
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64|amd64)
+        HOST_ARCH="x86_64"
+        ;;
+    aarch64|arm64)
+        HOST_ARCH="aarch64"
+        ;;
+    *)
+        error "不支持的 CPU 架构: $HOST_ARCH；当前安装器支持 x86_64 与 aarch64 (arm64)。"
+        ;;
+esac
+info "CPU 架构: $HOST_ARCH"
+
 # ───────────────────────── 检测环境 ─────────────────────────
 IS_WSL=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
@@ -90,7 +105,7 @@ if not ((3, 11) <= version <= (3, 12)):
 if struct.calcsize("P") * 8 != 64:
     raise RuntimeError("the installer requires 64-bit Python")
 '; then
-    error "选中的解释器未通过 Python 3.11-3.12/x64 实测: $PYTHON_BIN"
+    error "选中的解释器未通过 Python 3.11-3.12 64 位实测: $PYTHON_BIN"
 fi
 
 if [[ "$PYTHON_BIN" =~ ^python3\.(11|12)$ ]]; then
@@ -101,6 +116,17 @@ else
     PYTHON_DEV_PACKAGE="python3-dev"
 fi
 
+# ───────────────────────── 预检本地模型目录 ─────────────────────────
+MODELS_SOURCE="${MUSIC_TO_MIDI_MODELS_SOURCE:-${HOME}/models}"
+info "预检本地模型目录：${MODELS_SOURCE}"
+if [ ! -d "$MODELS_SOURCE" ]; then
+    error "本地模型目录不存在：${MODELS_SOURCE}。请按缓存镜像结构准备模型，或设置 MUSIC_TO_MIDI_MODELS_SOURCE 指向正确目录。"
+fi
+if ! "$PYTHON_BIN" "${REPO_DIR}/prepare_local_models.py" --check-only --source "$MODELS_SOURCE"; then
+    error "本地模型目录结构预检失败；安装器不会联网下载模型。"
+fi
+success "本地模型目录结构预检通过"
+
 # ───────────────────────── 安装系统依赖 ─────────────────────────
 info "安装系统依赖..."
 info "更新包列表..."
@@ -110,9 +136,12 @@ SYSTEM_PKGS=(
     # 版本控制
     git
     curl
+    # aarch64 上 ncls/diffq 需要从源码构建
+    build-essential
     # 音频处理
     ffmpeg
     fluidsynth
+    libsamplerate0
     libsndfile1
     libportaudio2
     portaudio19-dev
@@ -247,7 +276,7 @@ if not (version >= (3, 11) and version <= (3, 12)):
 if struct.calcsize("P") * 8 != 64:
     raise RuntimeError("the project venv must use 64-bit Python")
 '; then
-        warn "现有 venv 的解释器损坏或不符合 Python 3.11-3.12/x64 契约，正在使用 $PYTHON_BIN --clear 重建可复现环境..."
+        warn "现有 venv 的解释器损坏或不符合 Python 3.11-3.12 64 位契约，正在使用 $PYTHON_BIN --clear 重建可复现环境..."
         "$PYTHON_BIN" -m venv --clear "$VENV_DIR"
         success "虚拟环境已按固定解释器重建: $VENV_DIR"
     else
@@ -330,6 +359,18 @@ info "完整七模式固定使用 NVIDIA CUDA，不安装 IPEX/CPU 降级运行�
 info "安装项目 Python 依赖..."
 cd "$REPO_DIR"
 
+# onnxruntime-gpu 1.23.2 只提供 x86_64 wheel；上游从 1.29 起发布 aarch64
+# wheel。diffq-fixed 的 sdist 缺少 bitpack.pyx，arm64 改用上游同版本 diffq
+# 源码构建（audio-separator 在非 Windows 平台本来就要求 diffq）。
+if [ "$HOST_ARCH" = "aarch64" ]; then
+    ORT_GPU_REQUIREMENT="onnxruntime-gpu==1.31.1"
+    DIFFQ_REQUIREMENT="diffq==0.2.4"
+    info "arm64 适配: onnxruntime-gpu 1.31.1 + 源码构建 diffq 0.2.4"
+else
+    ORT_GPU_REQUIREMENT="onnxruntime-gpu==1.23.2"
+    DIFFQ_REQUIREMENT="diffq-fixed==0.2.4"
+fi
+
 if "$PIP" show audio-separator >/dev/null 2>&1; then
     info "检测到旧的 audio-separator，先卸载以避免 NumPy 解析冲突..."
     "$PIP" uninstall audio-separator -y
@@ -343,6 +384,12 @@ cleanup_requirements_file() {
 }
 trap cleanup_requirements_file EXIT
 grep -vE '^[[:space:]]*aria-amt[[:space:]]*@' requirements.txt > "$TMP_REQ"
+if [ "$HOST_ARCH" = "aarch64" ]; then
+    # requirements.txt 固定的是没有 aarch64 wheel 的 x86_64 版本；下面通过
+    # ORT_GPU_REQUIREMENT 安装 arm64 可用的 onnxruntime-gpu。
+    grep -vE '^[[:space:]]*onnxruntime-gpu([[:space:]=<>!~@;\[]|$)' "$TMP_REQ" > "${TMP_REQ}.arch"
+    mv "${TMP_REQ}.arch" "$TMP_REQ"
+fi
 ORT_PACKAGES_TO_REMOVE=()
 for ort_package in onnxruntime onnxruntime-gpu; do
     if "$PIP" show "$ort_package" >/dev/null 2>&1; then
@@ -364,7 +411,7 @@ info "安装 audio-separator 运行依赖（固定兼容 NumPy 1.26）..."
 "$PIP" install \
     "numpy==1.26.4" \
     "beartype==0.18.5" \
-    "diffq-fixed==0.2.4" \
+    "$DIFFQ_REQUIREMENT" \
     "julius==0.2.7" \
     "ml_collections==1.1.0" \
     "onnx-weekly==1.21.0.dev20260223" \
@@ -372,7 +419,7 @@ info "安装 audio-separator 运行依赖（固定兼容 NumPy 1.26）..."
     "pydub==0.25.1" \
     "requests>=2.32.5,<3" \
     "chardet>=5,<6" \
-    'onnxruntime-gpu==1.23.2; platform_system != "Darwin"' \
+    "$ORT_GPU_REQUIREMENT" \
     'onnxruntime==1.23.2; platform_system == "Darwin"' \
     "resampy==0.4.3" \
     "rotary-embedding-torch==0.6.5" \
@@ -394,14 +441,18 @@ if torch.version.cuda != "12.8" or not torch.cuda.is_available():
 if "CUDAExecutionProvider" not in providers:
     raise RuntimeError("Complete seven-mode runtime requires ONNX Runtime CUDAExecutionProvider")
 PY
+
+if [ "$HOST_ARCH" = "aarch64" ]; then
+    # PyTorch 2.7 的 cu128 wheel 自带 NVRTC 12.8，无法为 GB10（sm_121）编译
+    # jiterator 内核（如 torchaudio 幅度谱的复数 abs）。CUDA 13 NVRTC 兼容
+    # PyTorch 调用的 C ABI，因此源码安装时同样替换 venv 中的运行时编译器。
+    info "为 aarch64（sm_121 / GB10）配置兼容的 NVRTC 运行时..."
+    if ! "$PYTHON" "${REPO_DIR}/tools/nvrtc_arch_override.py" "$VENV_DIR"; then
+        warn "未找到 CUDA 13 NVRTC；GB10 上 Beat This 等运行时编译内核可能失败。"
+    fi
+fi
 "$PIP" install "audio-separator==0.44.1" --no-deps
 success "audio-separator 安装完成"
-
-info "下载其它大型模型前预检 MuScriptor Small/Medium/Large gated 访问权限..."
-if ! (cd "$REPO_DIR" && "$PYTHON" -c 'from src.utils.muscriptor_downloader import preflight_muscriptor_download_access; preflight_muscriptor_download_access()'); then
-    error "MuScriptor gated 访问预检失败；访问条件是浏览器已逐项接受三个仓库条款，并在项目 venv 中登录 Hugging Face。"
-fi
-success "MuScriptor Small/Medium/Large gated 访问权限预检通过"
 
 info "安装并严格校验官方 MuScriptor（不改写固定 PyTorch 运行时）..."
 MUSCRIPTOR_REQUIREMENT="$(cd "$REPO_DIR" && "$PYTHON" -c 'from src.utils.muscriptor_source_identity import MUSCRIPTOR_SOURCE_REQUIREMENT; print(MUSCRIPTOR_SOURCE_REQUIREMENT)')"
@@ -457,9 +508,6 @@ raise SystemExit(0 if reason == '' else 1)
 PY
 fi
 
-"$PYTHON" "${REPO_DIR}/download_aria_amt_model.py"
-success "Aria-AMT 模型准备完成"
-
 info "验证 ByteDance Piano 带踏板钢琴后端..."
 if ! "$PYTHON" - <<'PY'
 import sys
@@ -472,22 +520,6 @@ PY
 then
     error "ByteDance Piano 安装校验失败：piano-transcription-inference、torchlibrosa 或 matplotlib 不完整。"
 fi
-
-"$PYTHON" "${REPO_DIR}/download_bytedance_piano_model.py"
-success "ByteDance Piano 模型准备完成"
-
-info "准备 MIROS 多乐器后端..."
-"$PYTHON" "${REPO_DIR}/download_miros_model.py" --repo-dir "${REPO_DIR}/external/ai4m-miros"
-"$PYTHON" - <<'PY'
-import sys
-sys.path.insert(0, ".")
-from src.core.miros_transcriber import MirosTranscriber
-reason = MirosTranscriber.get_unavailable_reason()
-print(reason or "MIROS available")
-print("MIROS model:", MirosTranscriber.is_model_available())
-raise SystemExit(0 if reason == "" and MirosTranscriber.is_model_available() else 1)
-PY
-success "MIROS 后端准备完成"
 
 # ───────────────────────── 验证核心依赖 ─────────────────────────
 info "验证核心依赖..."
@@ -538,34 +570,20 @@ then
 fi
 success "YourMT3+ 源码身份检查通过"
 
-# ───────────────────────── 下载统一模型集合 ─────────────────────────
-info "下载并校验全部公开工作流模型（含 MuScriptor Small/Medium/Large 与 SoundFont）..."
+# ───────────────────────── 复制本地模型集合 ─────────────────────────
+info "从本地模型目录复制预下载模型：${MODELS_SOURCE}"
+info "安装器不会联网下载模型；缺少任何必需模型都会立即停止。"
 
-if ! "$PYTHON" "${REPO_DIR}/download_sota_models.py"; then
-    error "统一模型集合下载或校验失败"
+if ! "$PYTHON" "${REPO_DIR}/prepare_local_models.py" --source "$MODELS_SOURCE"; then
+    error "本地模型复制或离线校验失败；安装器不会回退到联网下载。"
 fi
-success "YourMT3+、MIROS、分离/钢琴模型、MuScriptor Small/Medium/Large 与 SoundFont 全部准备完成"
+success "YourMT3+、MIROS、分离/钢琴模型、MuScriptor Small/Medium/Large、ChordMini 与 SoundFont 已从本地复制并通过离线校验"
 
-info "Verifying/downloading Leap XE 90-band vocals assets..."
-
-if ! "$PYTHON" "${REPO_DIR}/download_vocal_model.py"; then
-    error "Leap XE vocals model download or verification failed"
+info "准备 MuseScore Studio 4 运行时（运行时组件，不属于模型权重）..."
+if ! "$PYTHON" "${REPO_DIR}/download_musescore_runtime.py"; then
+    error "MuseScore Studio 运行时准备或校验失败"
 fi
-success "Leap XE vocals model ready"
-
-info "Verifying/downloading Leap Instrumental accompaniment assets..."
-
-if ! "$PYTHON" "${REPO_DIR}/download_accompaniment_model.py"; then
-    error "Leap Instrumental accompaniment model download or verification failed"
-fi
-success "Leap Instrumental accompaniment model ready"
-
-info "Verifying/downloading TransKun V2 Aug assets..."
-
-if ! "$PYTHON" "${REPO_DIR}/download_transkun_v2_aug_model.py"; then
-    error "TransKun V2 Aug model download or verification failed"
-fi
-success "TransKun V2 Aug model ready"
+success "MuseScore Studio 运行时准备完成"
 
 # ───────────────────────── 验证启动脚本 ─────────────────────────
 info "验证版本控制的启动脚本..."
@@ -607,15 +625,12 @@ echo -e "  ${GREEN}✔${NC} ByteDance Piano 带踏板模型"
 echo -e "  ${GREEN}✔${NC} MuScriptor Small/Medium/Large 固定权重与 MuseScore General SoundFont"
 echo -e "  ${GREEN}✔${NC} FluidSynth 真实 MIDI 播放链"
 echo ""
-echo -e "  ${BOLD}模型维护命令：${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_sota_models.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_beat_this_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_multistem_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_vocal_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_accompaniment_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_transkun_v2_aug_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_bytedance_piano_model.py${NC}"
-echo -e "  ${YELLOW}venv/bin/python download_muscriptor_model.py --size all${NC}"
+echo -e "  ${BOLD}本地模型来源：${NC}"
+echo -e "  ${YELLOW}${MODELS_SOURCE}${NC}（可用 MUSIC_TO_MIDI_MODELS_SOURCE 覆盖）"
+echo ""
+echo -e "  ${BOLD}模型维护命令（只复制本地文件，不联网下载）：${NC}"
+echo -e "  ${YELLOW}venv/bin/python prepare_local_models.py --source \"${MODELS_SOURCE}\"${NC}"
+echo -e "  ${YELLOW}venv/bin/python prepare_local_models.py --source \"${MODELS_SOURCE}\" --skip-verify${NC}"
 echo ""
 if $IS_WSL; then
     echo -e "  ${YELLOW}WSL 首次运行环境命令：${NC}source ~/.bashrc"

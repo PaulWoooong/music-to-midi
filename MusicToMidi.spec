@@ -6,6 +6,7 @@ PyInstaller 打包配置文件
 """
 
 import os
+import platform
 import sys
 from pathlib import Path
 import importlib.util
@@ -640,3 +641,26 @@ coll = COLLECT(
     upx_exclude=[],
     name=collection_name,
 )
+
+# PyTorch 2.7's cu128 wheel bundles NVRTC 12.8, which cannot compile runtime
+# (jiterator) kernels for sm_121 devices such as the GB10.  CUDA 13 NVRTC is
+# ABI compatible with the calls PyTorch makes, so Linux arm64 CUDA bundles
+# replace the wheel copy after collection.  x86_64 and XPU builds keep theirs.
+if (
+    os.name != "nt"
+    and not IS_XPU
+    and platform.machine().strip().lower() in {"aarch64", "arm64"}
+):
+    try:
+        from tools.nvrtc_arch_override import apply_override
+
+        _nvrtc_override = apply_override(Path(DISTPATH) / collection_name)
+        if _nvrtc_override is None:
+            print(
+                "WARNING: no CUDA 13 NVRTC found; sm_121 devices will fail on "
+                "runtime-compiled kernels (e.g. torchaudio magnitude spectrograms)."
+            )
+        else:
+            print(f"INFO: NVRTC override active for arm64 bundle: {_nvrtc_override}")
+    except Exception as _nvrtc_exc:  # pragma: no cover - build-time diagnostics
+        print(f"WARNING: could not apply the NVRTC override: {_nvrtc_exc}")
