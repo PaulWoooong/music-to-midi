@@ -13,6 +13,8 @@ develop-eggs/
 dist/
 dist-p40/
 dist-p40-*/
+dist-linux/
+dist-linux-*/
 downloads/
 eggs/
 .eggs/

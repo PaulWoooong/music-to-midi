@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional
 
@@ -32,6 +34,20 @@ BS_ROFORMER_SW_MODEL = ROFORMER_SW_MODEL
 BS_ROFORMER_SW_CONFIG = ROFORMER_SW_CONFIG
 BS_ROFORMER_SW_DISPLAY_NAME = ROFORMER_SW_DISPLAY_NAME
 BS_ROFORMER_SW_REGISTRY_NAME = ROFORMER_SW_REGISTRY_NAME
+
+# audio-separator 0.44.1 的 list_supported_model_files() 会先联网拉取 UVR 的
+# download_checks.json，再读取下面这些键。完全离线的便携包没有网络；六声部分离
+# 只需要本地已随包分发的 BS-RoFormer SW 权重与配置，因此可以在一次调用内用这份
+# 空骨架代替联网结果（随包的 models.json / models-scores.json 仍会被正常合并）。
+_OFFLINE_DOWNLOAD_CHECKS = {
+    "demucs_download_list": {},
+    "vr_download_list": {},
+    "mdx_download_list": {},
+    "mdx_download_vip_list": {},
+    "mdx23c_download_list": {},
+    "mdx23c_download_vip_list": {},
+    "roformer_download_list": {},
+}
 
 
 class SixStemSeparator:
@@ -76,8 +92,34 @@ class SixStemSeparator:
             return
         original = separator.list_supported_model_files
 
+        def _collect_supported_models():
+            model_dir = str(getattr(separator, "model_file_dir", "") or "")
+            checks_path = Path(model_dir) / "download_checks.json" if model_dir else None
+            if checks_path is not None and checks_path.is_file():
+                # 已有本地 UVR 清单：完全走上游逻辑，不联网。
+                return original()
+            # 缺少 download_checks.json 时，用临时目录承载空骨架，让上游逻辑
+            # 既不联网，也不写入可能只读的模型目录。随包的 models.json 与
+            # models-scores.json 依然由上游合并进注册表。
+            with tempfile.TemporaryDirectory(prefix="mtm-audio-separator-") as temp_dir:
+                Path(temp_dir, "download_checks.json").write_text(
+                    json.dumps(_OFFLINE_DOWNLOAD_CHECKS), encoding="utf-8"
+                )
+                previous_model_dir = getattr(separator, "model_file_dir", None)
+                separator.model_file_dir = temp_dir
+                try:
+                    return original()
+                finally:
+                    if previous_model_dir is None:
+                        try:
+                            del separator.model_file_dir
+                        except AttributeError:
+                            pass
+                    else:
+                        separator.model_file_dir = previous_model_dir
+
         def _patched_list_supported_model_files():
-            models = original()
+            models = _collect_supported_models()
             mdxc_models = dict(models.get("MDXC", {}))
             if BS_ROFORMER_SW_REGISTRY_NAME not in mdxc_models:
                 mdxc_models[BS_ROFORMER_SW_REGISTRY_NAME] = {

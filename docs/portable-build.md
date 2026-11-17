@@ -116,3 +116,121 @@ Public assets contain complete bundles, lightweight frontends, Docker ZIP/tar.gz
 桌面结果窗口使用 ChordMini BTC，固定官方提交 `aa6e3a8d7b017f082fd2aaff9329d5c26af49c03`。完整模型准备脚本包含此资源；单独准备使用 `python download_chordmini_model.py`。构建前、暂存后与最终 App 目录均校验 `resources/chordmini-source.json` 中的源码、配置、README、LICENSE 和 BTC 权重身份，打包到 `models/chordmini`。`--chordmini-worker` 是可执行文件内部后台入口，隔离官方 `src` 命名空间，使用指定 NVIDIA GPU，与转写任务共享资源锁；模型失败不替换引擎。现有第三方发布门禁仍然有效，本次不发布安装包。
 
 The desktop result window uses ChordMini BTC at the pinned official revision above. Both `download_sota_models.py` and the standalone downloader prepare it. Source, staging and packaged App resources are verified against the per-file manifest and included under `models/chordmini`, with the upstream README and license. The internal `--chordmini-worker` entry isolates the upstream namespace and uses the selected NVIDIA device under the shared inference lock. Failed inference never substitutes another chord engine. All existing release gates remain in effect; this change does not publish a new package.
+
+## Linux 便携版（NVIDIA P40 / sm_61）
+
+`build_portable_linux.sh` 在 Ubuntu / Linux Mint x86_64 构建机上生成 PyInstaller `onedir` 目录，与 Windows 便携版共用同一份 `MusicToMidi.spec`，输出 `MusicToMidi`（GUI）、`MusicToMidiCLI`、`MusicToMidiBackend` 三个入口，以及 `gui.sh`、`cli.sh`、`backend.sh`、`p40-check.sh` 启动脚本。
+
+目标显卡为 NVIDIA Tesla P40（Pascal / Compute Capability 6.1 / `sm_61`），同时兼容更新的 NVIDIA 显卡。构建使用 PyTorch 2.7.0 `+cu126`：该 wheel 的 SASS 列表包含 `sm_60`，按 NVIDIA 二进制兼容规则可在 `sm_61` 上直接执行；`cu128` 构建不包含任何 `sm_61` 可执行代码，不能用于 P40。
+
+### 环境要求
+
+构建机：
+
+- Linux x86_64，Python 3.12（`/usr/bin/python3.12`）
+- 源码位置可写，剩余磁盘空间 ≥ 60 GB（成品约 24 GB，另需构建中间目录与压缩包空间）
+- 已解包的 v1.10.0 便携版资源目录（含 `models/`、`resources/`、`tools/`、`external/`）
+
+运行机：
+
+- Linux x86_64，glibc ≥ 2.39（产物在本机构建，不提供更老 glibc 的兼容层）
+- 兼容 CUDA 12.6 的 NVIDIA 驱动（≥ 525.60.13，建议 550 及以上）
+- GUI 需要 X11 或 Wayland；无显示环境请使用 `cli.sh`
+
+### 构建环境
+
+```bash
+/usr/bin/python3.12 -m venv venv
+venv/bin/pip install --upgrade pip setuptools wheel
+
+# P40 兼容的 CUDA 12.6 三件套
+venv/bin/pip install torch==2.7.0 torchaudio==2.7.0 torchvision==0.22.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+
+# 其余依赖（aria-amt / ariautils / muscriptor 使用固定源码或本地副本）
+venv/bin/pip install -r requirements.txt
+venv/bin/pip install audio-separator==0.44.1 --no-deps
+venv/bin/pip install "transkun==2.0.1" --no-deps --force-reinstall
+venv/bin/pip install pyinstaller
+```
+
+`audio-separator` 的运行时依赖（`onnx-weekly`、`onnx2torch-py313`、`diffq-fixed`、`onnxruntime-gpu==1.23.2` 等）、`aria-amt`/`ariautils` 与 `muscriptor==0.4.0` 需要与 `install.sh` 相同的固定版本；在无法访问 GitHub 的环境中，可从已发布的 v1.10.0 App 的 `_internal` 复制对应包，并保持 `src/utils/muscriptor_source_identity.py` 中的文件哈希一致。
+
+### 本地模型来源
+
+默认自动探测以下位置，也可以显式指定：
+
+```bash
+./build_portable_linux.sh --model-source "/path/to/MusicToMidi-Windows-GPU-App/_internal"
+```
+
+脚本识别的资源根目录包含 `models/`（或 `_internal/models/`），并把下列目录映射为 `MusicToMidi.spec` 需要的 `MUSIC_TO_MIDI_BUNDLE_*` 环境变量：
+
+```
+models/{aria_amt,audio-separator,beat_this,bytedance_piano,chordmini,
+        muscriptor_small,muscriptor_medium,muscriptor_large,muscriptor_assets,
+        transkun_v2_aug,yourmt3_all}
+external/ai4m-miros
+resources/{fluidsynth,musescore}
+tools/ffmpeg
+```
+
+模型只在构建时从本地复制，运行时不下载。ChordMini 资源按 `resources/chordmini-source.json` 逐文件校验 SHA-256，校验失败会停止构建。
+
+### 构建与打包
+
+```bash
+# 构建到 dist-linux/MusicToMidi-Linux-P40
+./build_portable_linux.sh
+
+# 构建后同时生成 tar.xz 与 SHA256
+./build_portable_linux.sh --package
+```
+
+常用选项：`--venv`、`--dist`、`--work`、`--name`、`--no-clean`、`--allow-arch-mismatch`。`--package` 使用 `xz -T0 -1` 生成 `<name>-linux-x86_64.tar.xz` 与 `.sha256`。
+
+### 脚本自动修复项
+
+PyInstaller 收集完成后，脚本会执行三项必要的产物修复：
+
+1. **libbrotli 版本统一**：PyInstaller 会把 Pillow 自带的新版 `libbrotli*` 与 MuseScore/系统旧版收集成同名库，导致导入 `onnxruntime` 时报 `undefined symbol: BrotliSharedDictionaryDestroyInstance`。脚本用 `pillow.libs` 中的一对库覆盖 `_internal/libbrotlicommon.so.1` 与 `libbrotlidec.so.1`。
+2. **FFmpeg 运行库补齐**：内置 FFmpeg 4.4 为动态链接，spec 只复制 `tools/ffmpeg`，不会带上 `libav*`/`libsw*`。脚本从模型源目录递归补齐缺失的 soname。
+3. **FluidSynth glibc 清理**：FluidSynth 的 `lib/` 内含构建机 glibc（`libc.so.6`、`libm`、`libpthread` 等），在较新系统上会段错误。脚本删除这些核心库，让 FluidSynth 使用宿主 glibc。
+
+脚本还会清理 `LD_LIBRARY_PATH` 中的空条目（等价于当前目录），避免打包过程中误加载 MuseScore 自带的旧版库。
+
+### 验收
+
+```bash
+cd dist-linux/MusicToMidi-Linux-P40
+
+# GUI/Qt/ONNX Runtime 加载顺序
+MUSIC_TO_MIDI_ACCELERATOR=cuda ./MusicToMidi --self-test-gui-package
+MUSIC_TO_MIDI_ACCELERATOR=cuda ./MusicToMidi --self-test-gui-runtime
+
+# 13 条转换路线
+./MusicToMidiCLI routes --json
+
+# 单文件转换（示例）
+MUSIC_TO_MIDI_ACCELERATOR=cuda ./MusicToMidiCLI convert song.wav -o out --mode piano_transkun
+```
+
+已在本机（RTX 4060，`sm_89`）验证：7 种处理模式、YourMT3+ / MIROS / MuScriptor 后端、无头 GUI 转换探针、FluidSynth 渲染与 MuseScore `AppRun --version`。尚未在真实 P40 上运行；`sm_60` SASS 的二进制兼容性依据 NVIDIA 文档与 PyTorch 架构列表判定。
+
+### P40 与 BF16
+
+Tesla P40 不支持 CUDA BF16 运算。`Config.cuda_bf16_policy`（默认 `auto`）会通过 `src/utils/gpu_utils.py` 检测设备能力：P40 上 Aria-AMT 等 BF16 路径自动回退 FP32，支持 BF16 的新显卡继续使用 BF16。需要强制时可用 `--cuda-bf16-policy fp32|bf16`。
+
+### 六声部分离的离线注册表
+
+`audio-separator 0.44.1` 的 `list_supported_model_files()` 在读取注册表前会联网拉取 UVR 的 `download_checks.json`。便携包没有网络，因此 `src/core/multi_stem_separator.py` 在缺少本地清单时，用一次性临时目录承载空骨架完成注册，再把本地 `BS-Rofo-SW-Fixed.ckpt` / `.yaml` 注册为 MDXC 模型；随包的 `models.json` 仍会正常合并。模型权重与配置已随包分发，分离阶段不会下载文件。
+
+如果用户目录中已存在 `download_checks.json`，则直接使用上游完整注册表，不做替换。
+
+### 已知限制
+
+- 产物按构建机 glibc 2.39 构建，只能在不低于该版本的系统运行；如需兼容 Ubuntu 20.04/22.04，应在更老的基础镜像中重新构建。
+- 未提供 CPU 版；缺少兼容 NVIDIA GPU 或驱动时会显式报错，而不是静默回退。
+- 本仓库的 `build_portable.ps1` / `build_web_executables.ps1` 仅适用于 Windows；Linux 只使用 `build_portable_linux.sh`。
+
+The Linux portable build (`build_portable_linux.sh`) shares `MusicToMidi.spec` with the Windows build and produces the `MusicToMidi`, `MusicToMidiCLI` and `MusicToMidiBackend` entry points plus launcher scripts. It targets Tesla P40 (`sm_61`) with a PyTorch 2.7.0 `+cu126` runtime (its `sm_60` SASS is binary-compatible with `sm_61`) and remains compatible with newer NVIDIA GPUs. Models are copied from a local unpacked v1.10.0 asset directory; nothing is downloaded at build or run time. The script normalizes conflicting libbrotli libraries, fills missing FFmpeg `libav*`/`libsw*` dependencies, and removes the bundled FluidSynth glibc so it uses the host libc. Six-stem separation works offline: when no local `download_checks.json` exists, the separator seeds a temporary empty registry skeleton and registers the bundled BS-RoFormer SW checkpoint locally. The bundle requires glibc ≥ 2.39 at runtime; no CPU fallback is provided.

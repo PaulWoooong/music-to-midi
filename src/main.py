@@ -284,12 +284,20 @@ def _run_gui_package_self_test() -> int:
         import torch
         from audio_separator.separator import Separator  # noqa: F401
 
-        torch_version = str(getattr(torch, "__version__", ""))
-        expected_torch_marker = "+cu128" if accelerator == "cuda" else "+xpu"
-        if expected_torch_marker not in torch_version.lower():
+        torch_version = str(getattr(torch, "__version__", "")).lower()
+        if accelerator == "cuda":
+            # cu126 是 P40/sm_61 兼容构建（wheel 内含 sm_60 SASS）；cu128 为
+            # 新显卡（RTX 50 系列）的默认构建。两者都是合法的 CUDA 便携包。
+            accepted_markers = ("+cu126", "+cu128")
+            if not any(marker in torch_version for marker in accepted_markers):
+                raise RuntimeError(
+                    f"Packaged torch {torch_version or '<unknown>'} is not a supported "
+                    f"CUDA build ({' or '.join(accepted_markers)})"
+                )
+        elif "+xpu" not in torch_version:
             raise RuntimeError(
                 f"Packaged torch {torch_version or '<unknown>'} is not the expected "
-                f"{accelerator.upper()} build ({expected_torch_marker})"
+                "XPU build (+xpu)"
             )
 
         providers = ort.get_available_providers()
