@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from importlib import metadata
 from itertools import chain
@@ -36,6 +37,7 @@ from src.utils.gpu_utils import (
     ensure_module_on_device,
     get_accelerator_type,
     get_device,
+    get_preferred_cuda_compute_dtype,
     rewrite_cuda_runtime_error,
 )
 from src.utils.midi_output import publish_midi_output
@@ -165,6 +167,29 @@ def _recalculate_aria_token_ids_on_device(
     probabilities[~combined_mask] = 0
     weighted_indices = probabilities * column_indices.float()
     return (weighted_indices.sum(dim=1) / (probabilities.sum(dim=1) + 1e-9)).round().to(torch.long)
+
+
+@contextmanager
+def _aria_autocast_policy(transcribe_module, use_bf16: bool):
+    """Force upstream Aria autocast to follow our CUDA BF16/FP32 policy.
+
+    Upstream ``process_segments`` is decorated with ``optional_bf16_autocast``,
+    which calls ``is_bf16_supported()`` at call time. That helper only looks at
+    the device, so an explicit ``--cuda-bf16-policy fp32`` on a BF16-capable GPU
+    would otherwise keep BF16 activations while our KV cache is FP32, raising
+    "source and destination dtypes match" errors. Patch the module attribute for
+    the duration of the call and restore it afterwards.
+    """
+
+    original = getattr(transcribe_module, "is_bf16_supported", None)
+    if original is None:
+        yield
+        return
+    try:
+        transcribe_module.is_bf16_supported = lambda: bool(use_bf16)
+        yield
+    finally:
+        transcribe_module.is_bf16_supported = original
 
 
 def _process_aria_segments_on_device(
@@ -590,11 +615,18 @@ class AriaAmtTranscriber:
                 first_window = audio_loader.submit(next, audio_segments, None)
                 model, tokenizer = self._load_aria_model()
                 first_audio_segment = first_window.result()
-            cache_dtype = torch.float
+            bf16_policy = getattr(self.config, "cuda_bf16_policy", "auto")
             if device.startswith("cuda"):
-                checker = getattr(torch.cuda, "is_bf16_supported", None)
-                if callable(checker) and checker():
-                    cache_dtype = torch.bfloat16
+                cache_dtype = get_preferred_cuda_compute_dtype(device, bf16_policy) or torch.float32
+            else:
+                # XPU/other accelerator paths use FP32 by default for compatibility.
+                cache_dtype = torch.float32
+            logger.info(
+                "Aria-AMT decoder cache dtype: %s (cuda_bf16_policy=%s, device=%s)",
+                cache_dtype,
+                bf16_policy,
+                device,
+            )
             if device.startswith("cuda"):
                 model.decoder.setup_cache(
                     batch_size=1,
@@ -669,13 +701,17 @@ class AriaAmtTranscriber:
                         device=device,
                     )
                 else:
-                    (sequence,) = transcribe_module.process_segments(
-                        tasks=segment_tasks,
-                        model=model,
-                        audio_transform=audio_transform,
-                        tokenizer=tokenizer,
-                        logger=logger,
-                    )
+                    with _aria_autocast_policy(
+                        transcribe_module,
+                        cache_dtype == torch.bfloat16,
+                    ):
+                        (sequence,) = transcribe_module.process_segments(
+                            tasks=segment_tasks,
+                            model=model,
+                            audio_transform=audio_transform,
+                            tokenizer=tokenizer,
+                            logger=logger,
+                        )
                 if self._cancelled:
                     raise InterruptedError("Aria-AMT 转写处理已取消")
                 context_exhausted = len(sequence) >= transcribe_module.MAX_BLOCK_LEN

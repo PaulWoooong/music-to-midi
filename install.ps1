@@ -8,7 +8,12 @@
 param(
     [ValidateSet("cuda", "xpu")]
     [string]$Accelerator = "cuda",
-    [string]$VenvName = ""
+    [string]$VenvName = "",
+    # 可选：从本地目录复制模型/资源，避免重新下载。
+    # 支持子目录名：aria_amt, bytedance_piano, transkun_v2_aug, yourmt3_all,
+    # audio-separator, beat_this, ai4m-miros(或miros), muscriptor_small, muscriptor_medium,
+    # muscriptor_large, muscriptor_assets, chordmini, fluidsynth, musescore 等。
+    [string]$ModelSourceDir = ""
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +36,99 @@ $VENV_DIR = Join-Path $REPO_DIR $VenvName
 $PIP      = Join-Path $VENV_DIR "Scripts\pip.exe"
 $PYTHON   = Join-Path $VENV_DIR "Scripts\python.exe"
 . (Join-Path $REPO_DIR "scripts\powershell_helpers.ps1")
+
+function Copy-TreeContentsIfExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not (Test-Path -LiteralPath $Source)) { return $false }
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    }
+    $item = Get-Item -LiteralPath $Source -Force
+    if ($item.PSIsContainer) {
+        Copy-Item -Path (Join-Path $Source "*") -Destination $Destination -Recurse -Force -ErrorAction Stop
+    } else {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+    }
+    Write-Ok "已从本地源复制 ${Label}: $Source -> $Destination"
+    return $true
+}
+
+function Copy-ModelsFromLocalSource {
+    param([Parameter(Mandatory = $true)][string]$SourceRoot)
+
+    $root = [IO.Path]::GetFullPath($SourceRoot)
+    if (-not (Test-Path -LiteralPath $root)) {
+        Write-Warn "ModelSourceDir 不存在，跳过本地模型复制: $root"
+        return
+    }
+    Write-Info "从本地模型源复制模型/资源（不重新下载）: $root"
+
+    $homeDir = $env:USERPROFILE
+    $cacheRoot = Join-Path $homeDir ".cache\music_ai_models"
+    $musicAiModels = Join-Path $homeDir ".music-to-midi\models"
+
+    # Standard cache/model directories
+    $dirMappings = @(
+        @{ Names = @("aria_amt"); Target = (Join-Path $cacheRoot "aria_amt"); Label = "Aria-AMT" },
+        @{ Names = @("bytedance_piano"); Target = (Join-Path $cacheRoot "bytedance_piano"); Label = "ByteDance Piano" },
+        @{ Names = @("transkun_v2_aug"); Target = (Join-Path $cacheRoot "transkun_v2_aug"); Label = "TransKun V2 Aug" },
+        @{ Names = @("yourmt3_all", "yourmt3"); Target = (Join-Path $cacheRoot "yourmt3_all"); Label = "YourMT3+" },
+        @{ Names = @("audio-separator", "audio_separator"); Target = (Join-Path $musicAiModels "audio-separator"); Label = "audio-separator models" },
+        @{ Names = @("beat_this"); Target = (Join-Path $musicAiModels "beat_this"); Label = "Beat This" },
+        @{ Names = @("chordmini"); Target = (Join-Path $musicAiModels "chordmini"); Label = "ChordMini" }
+    )
+    foreach ($m in $dirMappings) {
+        foreach ($name in $m.Names) {
+            $src = Join-Path $root $name
+            if (Test-Path -LiteralPath $src) {
+                Copy-TreeContentsIfExists -Source $src -Destination $m.Target -Label $m.Label | Out-Null
+                break
+            }
+        }
+    }
+
+    # MIROS source tree
+    foreach ($name in @("ai4m-miros", "miros", "MIROS")) {
+        $src = Join-Path $root $name
+        if (Test-Path -LiteralPath $src) {
+            $dst = Join-Path $REPO_DIR "external\ai4m-miros"
+            Copy-TreeContentsIfExists -Source $src -Destination $dst -Label "MIROS source/weights" | Out-Null
+            # Also common root location
+            $dst2 = Join-Path $REPO_DIR "ai4m-miros"
+            Copy-TreeContentsIfExists -Source $src -Destination $dst2 -Label "MIROS source/weights (repo root)" | Out-Null
+            break
+        }
+    }
+
+    # MuScriptor model dirs (bundled lookup paths under repo/models)
+    foreach ($size in @("small", "medium", "large")) {
+        $src = Join-Path $root ("muscriptor_" + $size)
+        if (Test-Path -LiteralPath $src) {
+            $dst = Join-Path $REPO_DIR ("models\muscriptor_" + $size)
+            Copy-TreeContentsIfExists -Source $src -Destination $dst -Label ("MuScriptor-" + $size) | Out-Null
+        }
+    }
+    $assetsSrc = Join-Path $root "muscriptor_assets"
+    if (Test-Path -LiteralPath $assetsSrc) {
+        $dst = Join-Path $REPO_DIR "models\muscriptor_assets"
+        Copy-TreeContentsIfExists -Source $assetsSrc -Destination $dst -Label "MuScriptor assets" | Out-Null
+    }
+
+    # Optional runtime bundles (if provided)
+    foreach ($name in @("fluidsynth", "musescore")) {
+        $src = Join-Path $root $name
+        if (Test-Path -LiteralPath $src) {
+            $dst = Join-Path $REPO_DIR ("tools\" + $name)
+            Copy-TreeContentsIfExists -Source $src -Destination $dst -Label $name | Out-Null
+        }
+    }
+
+    Write-Ok "本地模型复制步骤完成（后续校验脚本将优先使用已存在的有效文件）"
+}
 
 # --- 辅助输出函数 ---
 function Write-Info  { param($msg) Write-Host "[信息]  $msg" -ForegroundColor Cyan }
@@ -755,12 +853,46 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) { Write-Err "audio-separator 安装失败" }
 Write-Ok "audio-separator 安装成功"
 
-Write-Info "下载其它大型模型前预检 MuScriptor Small/Medium/Large gated 访问权限..."
-& "$PYTHON" -c "from src.utils.muscriptor_downloader import preflight_muscriptor_download_access; preflight_muscriptor_download_access()"
-if ($LASTEXITCODE -ne 0) {
-    Write-Err "MuScriptor gated 访问预检失败；访问条件是浏览器已逐项接受三个仓库条款，并在项目 venv 中登录 Hugging Face。"
+if (-not [string]::IsNullOrWhiteSpace($ModelSourceDir)) {
+    Copy-ModelsFromLocalSource -SourceRoot $ModelSourceDir
 }
-Write-Ok "MuScriptor Small/Medium/Large gated 访问权限预检通过"
+
+$skipMuscriptorPreflight = $false
+if (-not [string]::IsNullOrWhiteSpace($ModelSourceDir)) {
+    $muscriptorLocalCheck = @"
+import sys
+from pathlib import Path
+sys.path.insert(0, r'$REPO_DIR')
+try:
+    from src.models.data_models import MuscriptorModel
+    from src.utils.muscriptor_downloader import get_cached_muscriptor_paths
+    from src.utils.muscriptor_soundfont_downloader import is_muscriptor_soundfont_available
+    for size in MuscriptorModel:
+        get_cached_muscriptor_paths(size, validate_hashes=True)
+    ok = bool(is_muscriptor_soundfont_available())
+except Exception:
+    ok = False
+print('OK' if ok else 'MISSING')
+"@
+    $checkOut = $muscriptorLocalCheck | & "$PYTHON" - 2>&1
+    if ($LASTEXITCODE -eq 0 -and (($checkOut | Select-Object -Last 1) -eq 'OK')) {
+        $skipMuscriptorPreflight = $true
+        Write-Ok "检测到本地 MuScriptor 模型与 SoundFont，跳过 Hugging Face gated 访问预检"
+    } else {
+        Write-Warn "本地 MuScriptor 模型/资源不完整，仍需进行 Hugging Face gated 访问预检"
+    }
+}
+
+if (-not $skipMuscriptorPreflight) {
+    Write-Info "下载其它大型模型前预检 MuScriptor Small/Medium/Large gated 访问权限..."
+    & "$PYTHON" -c "from src.utils.muscriptor_downloader import preflight_muscriptor_download_access; preflight_muscriptor_download_access()"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "MuScriptor gated 访问预检失败；访问条件是浏览器已逐项接受三个仓库条款，并在项目 venv 中登录 Hugging Face。"
+    }
+    Write-Ok "MuScriptor Small/Medium/Large gated 访问权限预检通过"
+} else {
+    Write-Info "已跳过 MuScriptor gated 访问预检（使用本地模型源）"
+}
 
 Write-Info "安装并严格校验官方 MuScriptor（不改写固定 PyTorch 运行时）..."
 $muscriptorRequirement = & "$PYTHON" -c "from src.utils.muscriptor_source_identity import MUSCRIPTOR_SOURCE_REQUIREMENT; print(MUSCRIPTOR_SOURCE_REQUIREMENT)"
@@ -972,7 +1104,11 @@ Write-Ok "YourMT3+ 源码身份检查通过"
 Write-Info "第 11 步/共 12 步  下载并校验全部公开工作流模型（含 MuScriptor Small/Medium/Large 与 SoundFont）..."
 
 Set-Location $REPO_DIR
-& "$PYTHON" (Join-Path $REPO_DIR "download_sota_models.py")
+$sotaArgs = @((Join-Path $REPO_DIR "download_sota_models.py"))
+if (-not [string]::IsNullOrWhiteSpace($ModelSourceDir)) {
+    $sotaArgs += @("--model-source-dir", $ModelSourceDir)
+}
+& "$PYTHON" @sotaArgs
 if ($LASTEXITCODE -eq 0) {
     Write-Ok "YourMT3+、MIROS、分离/钢琴模型、MuScriptor Small/Medium/Large 与 SoundFont 全部准备成功"
 } else {

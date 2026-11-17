@@ -1,0 +1,79 @@
+MusicToMidi 钢琴转录便携包（NVIDIA Tesla P40 / sm_61 适配）
+================================================================
+
+本目录是自包含的 Linux x86_64 程序，已内置：
+  * Python 运行时与 PyTorch 2.7.0 + CUDA 12.6
+  * 4 个钢琴转写引擎：TransKun / TransKun V2 Aug / Aria-AMT / ByteDance Piano
+  * 全部模型权重（无需联网下载）
+  * 静态 ffmpeg（可直接读取 mp3 / mp4 / flac / m4a 等输入）
+  * 钢琴专用桌面 GUI（PyQt6）与命令行两种用法
+
+系统要求
+--------
+1. Linux x86_64，glibc >= 2.39
+   （本包在 Linux Mint 22 / Ubuntu 24.04 级别系统上构建；
+    Ubuntu 20.04/22.04 等旧系统请用发行方提供的 glibc 2.31 版本）
+2. NVIDIA 驱动支持 CUDA 12.6：Linux 驱动版本 >= 560.28.03
+   （用 `nvidia-smi` 确认；驱动只要求 >= 该版本，不必安装完整 CUDA Toolkit）
+3. Tesla P40（24GB）。PyTorch 内置 sm_60 SASS，与 P40 的 sm_61 二进制兼容；
+   同时包含 sm_70/75/80/86/90，可换用较新的 NVIDIA 显卡。
+
+快速开始
+--------
+  # 1) 检查 GPU / CUDA / 模型是否可用
+  ./p40-check.sh
+
+  # 2a) 图形界面（推荐桌面用户）
+  ./gui.sh
+  # 也可以直接双击/运行主程序（不带参数时默认打开 GUI）
+
+  # 2b) 命令行转写（默认 TransKun）
+  ./run.sh 你的音频.wav -o 输出目录 -e transkun
+
+  # 3) 其他引擎
+  ./run.sh 你的音频.mp3 -o 输出目录 -e transkun_v2_aug
+  ./run.sh 你的音频.mp4 -o 输出目录 -e aria_amt
+  ./run.sh 你的音频.flac -o 输出目录 -e bytedance_pedal
+
+  # 4) 查看全部参数
+  ./run.sh --help
+
+常用参数
+--------
+  -e / --engine           transkun | transkun_v2_aug | aria_amt | bytedance_pedal
+  -o / --output-dir       输出目录（默认 output_piano_p40）
+  --bpm N                 指定速度，跳过节拍检测
+  --skip-beat-detect      固定 120 BPM（最省时，适合快速试跑）
+  --cuda-bf16-policy      auto（默认）| fp32 | bf16
+  --cpu                   强制 CPU
+  --gpu-device N          指定 GPU 序号（多卡时使用）
+
+P40 的 BF16 说明
+----------------
+P40（Pascal）不支持 BF16 张量运算。默认 auto 策略会检测设备能力并自动回退
+到 FP32（32-bit float）；也可显式使用：
+
+  ./run.sh 音频.wav -o 输出 -e aria_amt --cuda-bf16-policy fp32
+
+后续更换为支持 BF16 的新 NVIDIA 显卡时，auto/bf16 会自动使用 BF16，无需改配置。
+Aria-AMT 运行时会在日志中打印实际 cache dtype，便于确认。
+
+输出
+----
+每个输入生成一个 MIDI 文件，命名形如：
+  输入文件名_piano_transkun.mid
+  输入文件名_piano_transkun_v2_aug.mid
+  输入文件名_piano_aria.mid
+  输入文件名_piano_bytedance_pedal.mid
+
+故障排查
+--------
+* 提示 "no kernel image is available"：
+  GPU 架构不受当前 PyTorch 支持。请运行 ./p40-check.sh 确认
+  "CUDA arch compatible" 为 True；P40 应显示通过 sm_60 兼容。
+* 提示 CUDA driver version is insufficient：
+  升级 NVIDIA 驱动到 560.28.03 或更高。
+* 没有 GPU 或驱动过旧：加 --cpu 仍可运行（速度较慢）。
+* 首次启动会比后续稍慢（解压/加载动态库），属正常现象。
+
+模型已随包提供，请勿删除 _internal/models 目录。

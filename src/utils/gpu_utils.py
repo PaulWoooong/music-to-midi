@@ -5,6 +5,7 @@ import gc
 import logging
 import os
 import platform
+import re
 import sys
 import threading
 from typing import List, Optional, Tuple
@@ -219,6 +220,7 @@ def rewrite_cuda_runtime_error(error: BaseException, device: Optional[str] = Non
     supported_arches = "未知"
     torch_version = None
     cuda_version = None
+    major = minor = None
 
     if torch is not None:
         torch_version = getattr(torch, "__version__", None)
@@ -257,6 +259,14 @@ def rewrite_cuda_runtime_error(error: BaseException, device: Optional[str] = Non
             "请改用兼容的 NVIDIA 显卡，或使用与该显卡兼容的 PyTorch/CUDA 重新打包。",
         ]
     )
+    if major == 6 and minor == 1:
+        details.append(
+            "检测到 Pascal (sm_61，如 Tesla P40/P100/GTX 10 系列)。"
+            "请使用包含 sm_61 的 PyTorch 构建：例如源码编译时设置 "
+            "TORCH_CUDA_ARCH_LIST=6.1，或选用仍包含 sm_61 的预编译 wheel/"
+            "CUDA 组合，并确认对应的 NVIDIA 驱动与 CUDA 版本兼容。"
+            "在 24GB P40 上也可优先使用 CPU/较小批次或较轻模型作为回退。"
+        )
     return "\n".join(details)
 
 
@@ -697,6 +707,134 @@ def get_accelerator_label() -> str:
         return f"{accel_type}: {name}"
     labels = {"cuda": "CUDA GPU", "rocm": "ROCm GPU", "mps": "Apple MPS", "xpu": "Intel XPU", "directml": "DirectML GPU"}
     return labels.get(accel, "GPU")
+
+
+_CUDA_ARCH_ENTRY = re.compile(r"^(sm|compute)_(\d+)([a-z]?)$")
+
+
+def get_cuda_compatible_arches(
+    device: str = "cuda:0",
+    arch_list: Optional[List[str]] = None,
+) -> List[str]:
+    """Return the arch-list entries that can actually run on ``device``.
+
+    NVIDIA binary compatibility: a SASS cubin built for the same major compute
+    capability with an equal or lower minor version runs on the device, so
+    ``sm_60`` (Pascal) covers ``sm_61`` (Tesla P40/GP102). PTX
+    (``compute_X.Y``) is JIT-compiled and therefore also covers newer devices of
+    the same or a higher capability. Architecture-specific entries such as
+    ``sm_90a`` only match their exact target.
+    """
+
+    torch = _get_torch()
+    if torch is None:
+        return []
+    try:
+        props = torch.cuda.get_device_properties(_get_cuda_device_index(device))
+    except Exception:
+        return []
+    target = (int(getattr(props, "major", 0)), int(getattr(props, "minor", 0)))
+    arches = list(arch_list if arch_list is not None else torch.cuda.get_arch_list())
+
+    compatible: List[str] = []
+    for raw in arches:
+        entry = str(raw).strip()
+        match = _CUDA_ARCH_ENTRY.match(entry)
+        if not match:
+            continue
+        kind, digits, suffix = match.groups()
+        # NVIDIA encodes compute capability 10.x as "100"; split into major/minor.
+        capability = int(digits)
+        major, minor = divmod(capability, 10)
+        if suffix:
+            # sm_90a is architecture-specific and cannot run elsewhere.
+            if kind == "sm" and (major, minor) == target:
+                compatible.append(entry)
+            continue
+        if kind == "sm":
+            if major == target[0] and minor <= target[1]:
+                compatible.append(entry)
+        elif (major, minor) <= target:
+            compatible.append(entry)
+    return compatible
+
+
+def is_cuda_arch_compatible(
+    device: str = "cuda:0",
+    arch_list: Optional[List[str]] = None,
+) -> Optional[bool]:
+    """Return whether the CUDA wheel contains code usable on ``device``.
+
+    Returns ``None`` when CUDA/PyTorch is unavailable so callers can avoid a
+    false negative on hosts without a GPU.
+    """
+
+    torch = _get_torch()
+    if torch is None or not torch.cuda.is_available():
+        return None
+    try:
+        torch.cuda.get_device_properties(_get_cuda_device_index(device))
+    except Exception:
+        return None
+    return bool(get_cuda_compatible_arches(device, arch_list))
+
+
+def is_cuda_bf16_supported(device: str = "cuda:0") -> bool:
+    """Return True only when the selected CUDA device/runtime can use BF16 safely."""
+    torch = _get_torch()
+    if torch is None or not torch.cuda.is_available():
+        return False
+    checker = getattr(torch.cuda, "is_bf16_supported", None)
+    try:
+        if callable(checker):
+            # Some PyTorch builds accept a device/index argument.
+            try:
+                supported = bool(checker(_get_cuda_device_index(device)))
+            except TypeError:
+                supported = bool(checker())
+            if not supported:
+                return False
+        props = torch.cuda.get_device_properties(_get_cuda_device_index(device))
+        # Pascal (sm_61, e.g. P40) and older architectures do not support BF16.
+        return (int(getattr(props, "major", 0)), int(getattr(props, "minor", 0))) >= (8, 0)
+    except Exception as exc:
+        logger.debug("BF16 capability check failed for %s: %s", device, exc)
+        return False
+
+
+def get_preferred_cuda_compute_dtype(
+    device: str = "cuda:0",
+    policy: str = "auto",
+):
+    """Select CUDA compute dtype.
+
+    policy:
+      - auto: use BF16 only when supported; fall back to FP32 on unsupported/P40.
+      - fp32: always FP32 (treat BF16 ops as FP32/BF32-class fallback for legacy GPUs).
+      - bf16: request BF16 when supported, else FP32.
+    """
+    torch = _get_torch()
+    if torch is None:
+        return None
+    normalized = str(policy or "auto").strip().lower()
+    if normalized not in {"auto", "fp32", "bf16"}:
+        normalized = "auto"
+
+    if device.startswith("xpu"):
+        # XPU path is handled separately by callers; keep FP32 as safe default.
+        return torch.float32
+
+    if not device.startswith("cuda"):
+        return torch.float32
+
+    if normalized == "fp32":
+        return torch.float32
+
+    if is_cuda_bf16_supported(device):
+        return torch.bfloat16
+
+    # P40/sm_61 and other unsupported GPUs: BF16 CUDA ops fall back to FP32.
+    return torch.float32
 
 
 def diagnose_gpu() -> dict:

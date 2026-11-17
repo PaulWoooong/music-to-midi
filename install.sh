@@ -1,12 +1,35 @@
 #!/usr/bin/env bash
 # Music to MIDI - Linux/WSL 自动安装脚本
 # 支持提供 64 位 Python 3.11/3.12 的 Debian/Ubuntu/WSL2 (WSLg)
-# 用法: bash install.sh
+# 用法: bash install.sh [--model-source-dir <本地模型目录>]
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${REPO_DIR}/venv"
+MODEL_SOURCE_DIR=""
+
+# ───────────────────────── 参数解析 ─────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model-source-dir)
+            MODEL_SOURCE_DIR="${2:-}"
+            shift 2
+            ;;
+        --model-source-dir=*)
+            MODEL_SOURCE_DIR="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            echo "用法: bash install.sh [--model-source-dir <本地模型目录>]"
+            exit 0
+            ;;
+        *)
+            echo -e "\033[1;33m[WARN]\033[0m  未知参数: $1" >&2
+            shift
+            ;;
+    esac
+done
 
 # ───────────────────────── 颜色输出 ─────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -397,11 +420,105 @@ PY
 "$PIP" install "audio-separator==0.44.1" --no-deps
 success "audio-separator 安装完成"
 
-info "下载其它大型模型前预检 MuScriptor Small/Medium/Large gated 访问权限..."
-if ! (cd "$REPO_DIR" && "$PYTHON" -c 'from src.utils.muscriptor_downloader import preflight_muscriptor_download_access; preflight_muscriptor_download_access()'); then
-    error "MuScriptor gated 访问预检失败；访问条件是浏览器已逐项接受三个仓库条款，并在项目 venv 中登录 Hugging Face。"
+
+copy_tree_contents_if_exists() {
+    local src="$1" dst="$2" label="$3"
+    [ -e "$src" ] || return 0
+    mkdir -p "$dst"
+    if [ -d "$src" ]; then
+        cp -a "$src/." "$dst/"
+    else
+        cp -a "$src" "$dst/"
+    fi
+    success "已从本地源复制 ${label}: $src -> $dst"
+}
+
+copy_models_from_local_source() {
+    local root="$1"
+    if [ -z "$root" ] || [ ! -e "$root" ]; then
+        warn "Model source dir 不存在，跳过本地模型复制: $root"
+        return 0
+    fi
+    root="$(cd "$root" && pwd)"
+    info "从本地模型源复制模型/资源（不重新下载）: $root"
+
+    local cache_root="${HOME}/.cache/music_ai_models"
+    local music_models="${HOME}/.music-to-midi/models"
+
+    [ -e "$root/aria_amt" ] && copy_tree_contents_if_exists "$root/aria_amt" "$cache_root/aria_amt" "Aria-AMT"
+    [ -e "$root/bytedance_piano" ] && copy_tree_contents_if_exists "$root/bytedance_piano" "$cache_root/bytedance_piano" "ByteDance Piano"
+    [ -e "$root/transkun_v2_aug" ] && copy_tree_contents_if_exists "$root/transkun_v2_aug" "$cache_root/transkun_v2_aug" "TransKun V2 Aug"
+    if [ -e "$root/yourmt3_all" ]; then
+        copy_tree_contents_if_exists "$root/yourmt3_all" "$cache_root/yourmt3_all" "YourMT3+"
+    elif [ -e "$root/yourmt3" ]; then
+        copy_tree_contents_if_exists "$root/yourmt3" "$cache_root/yourmt3_all" "YourMT3+"
+    fi
+    if [ -e "$root/audio-separator" ]; then
+        copy_tree_contents_if_exists "$root/audio-separator" "$music_models/audio-separator" "audio-separator models"
+    elif [ -e "$root/audio_separator" ]; then
+        copy_tree_contents_if_exists "$root/audio_separator" "$music_models/audio-separator" "audio-separator models"
+    fi
+    [ -e "$root/beat_this" ] && copy_tree_contents_if_exists "$root/beat_this" "$music_models/beat_this" "Beat This"
+    [ -e "$root/chordmini" ] && copy_tree_contents_if_exists "$root/chordmini" "$music_models/chordmini" "ChordMini"
+
+    for name in ai4m-miros miros MIROS; do
+        if [ -e "$root/$name" ]; then
+            copy_tree_contents_if_exists "$root/$name" "$REPO_DIR/external/ai4m-miros" "MIROS source/weights"
+            copy_tree_contents_if_exists "$root/$name" "$REPO_DIR/ai4m-miros" "MIROS source/weights (root)"
+            break
+        fi
+    done
+
+    for size in small medium large; do
+        [ -e "$root/muscriptor_${size}" ] && copy_tree_contents_if_exists "$root/muscriptor_${size}" "$REPO_DIR/models/muscriptor_${size}" "MuScriptor-${size}"
+    done
+    [ -e "$root/muscriptor_assets" ] && copy_tree_contents_if_exists "$root/muscriptor_assets" "$REPO_DIR/models/muscriptor_assets" "MuScriptor assets"
+
+    [ -e "$root/fluidsynth" ] && copy_tree_contents_if_exists "$root/fluidsynth" "$REPO_DIR/tools/fluidsynth" "FluidSynth"
+    [ -e "$root/musescore" ] && copy_tree_contents_if_exists "$root/musescore" "$REPO_DIR/tools/musescore" "MuseScore"
+
+    success "本地模型复制步骤完成（后续校验脚本将优先使用已存在的有效文件）"
+}
+
+
+if [ -n "$MODEL_SOURCE_DIR" ]; then
+    copy_models_from_local_source "$MODEL_SOURCE_DIR"
 fi
-success "MuScriptor Small/Medium/Large gated 访问权限预检通过"
+
+SKIP_MUSCRIPTOR_PREFLIGHT=false
+if [ -n "$MODEL_SOURCE_DIR" ]; then
+    if (cd "$REPO_DIR" && "$PYTHON" - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+try:
+    from src.models.data_models import MuscriptorModel
+    from src.utils.muscriptor_downloader import get_cached_muscriptor_paths
+    from src.utils.muscriptor_soundfont_downloader import is_muscriptor_soundfont_available
+    for size in MuscriptorModel:
+        get_cached_muscriptor_paths(size, validate_hashes=True)
+    ok = bool(is_muscriptor_soundfont_available())
+except Exception:
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+    ); then
+        SKIP_MUSCRIPTOR_PREFLIGHT=true
+        success "检测到本地 MuScriptor 模型与 SoundFont，跳过 Hugging Face gated 访问预检"
+    else
+        warn "本地 MuScriptor 模型/资源不完整，仍需进行 Hugging Face gated 访问预检"
+    fi
+fi
+
+if [ "$SKIP_MUSCRIPTOR_PREFLIGHT" != "true" ]; then
+    info "下载其它大型模型前预检 MuScriptor Small/Medium/Large gated 访问权限..."
+    if ! (cd "$REPO_DIR" && "$PYTHON" -c 'from src.utils.muscriptor_downloader import preflight_muscriptor_download_access; preflight_muscriptor_download_access()'); then
+        error "MuScriptor gated 访问预检失败；访问条件是浏览器已逐项接受三个仓库条款，并在项目 venv 中登录 Hugging Face。"
+    fi
+    success "MuScriptor Small/Medium/Large gated 访问权限预检通过"
+else
+    info "已跳过 MuScriptor gated 访问预检（使用本地模型源）"
+fi
 
 info "安装并严格校验官方 MuScriptor（不改写固定 PyTorch 运行时）..."
 MUSCRIPTOR_REQUIREMENT="$(cd "$REPO_DIR" && "$PYTHON" -c 'from src.utils.muscriptor_source_identity import MUSCRIPTOR_SOURCE_REQUIREMENT; print(MUSCRIPTOR_SOURCE_REQUIREMENT)')"
@@ -541,7 +658,9 @@ success "YourMT3+ 源码身份检查通过"
 # ───────────────────────── 下载统一模型集合 ─────────────────────────
 info "下载并校验全部公开工作流模型（含 MuScriptor Small/Medium/Large 与 SoundFont）..."
 
-if ! "$PYTHON" "${REPO_DIR}/download_sota_models.py"; then
+SOTA_ARGS=("${REPO_DIR}/download_sota_models.py")
+if [ -n "$MODEL_SOURCE_DIR" ]; then SOTA_ARGS+=("--model-source-dir" "$MODEL_SOURCE_DIR"); fi
+if ! "$PYTHON" "${SOTA_ARGS[@]}"; then
     error "统一模型集合下载或校验失败"
 fi
 success "YourMT3+、MIROS、分离/钢琴模型、MuScriptor Small/Medium/Large 与 SoundFont 全部准备完成"

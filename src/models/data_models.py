@@ -549,6 +549,9 @@ class Config:
     # 处理设置
     use_gpu: bool = True
     gpu_device: int = 0
+    # CUDA BF16 策略：auto=仅在支持的 GPU 上使用 BF16（P40/sm_61 等不支持时回退 FP32）；
+    # fp32=始终使用 FP32（兼容 P40 等无 BF16 卡）；bf16=在支持时使用 BF16，否则回退 FP32。
+    cuda_bf16_policy: str = "auto"
 
     # 七种处理模式：三个多乐器流程 + 四个固定钢琴专用流程
     processing_mode: str = "smart"
@@ -670,6 +673,14 @@ class Config:
             raise ValueError(f"invalid midi_track_mode: {self.midi_track_mode!r}")
         self.midi_track_mode = normalized_track_mode
 
+        valid_cuda_bf16_policies = {"auto", "fp32", "bf16"}
+        normalized_cuda_bf16_policy = (
+            str(getattr(self, "cuda_bf16_policy", "auto") or "auto").strip().lower()
+        )
+        if normalized_cuda_bf16_policy not in valid_cuda_bf16_policies:
+            normalized_cuda_bf16_policy = "auto"
+        self.cuda_bf16_policy = normalized_cuda_bf16_policy
+
         valid_yourmt3_models = {model.value for model in YourMT3Model}
         normalized_yourmt3_model = str(getattr(self, "yourmt3_model", "") or "").strip().lower()
         if normalized_yourmt3_model not in valid_yourmt3_models:
@@ -762,6 +773,7 @@ class Config:
             "theme": self.theme,
             "use_gpu": self.use_gpu,
             "gpu_device": self.gpu_device,
+            "cuda_bf16_policy": self.cuda_bf16_policy,
             "processing_mode": self.processing_mode,
             "multi_instrument_model": self.multi_instrument_model,
             "transcription_backend": self.transcription_backend,

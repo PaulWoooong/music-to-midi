@@ -1,3 +1,7 @@
+import argparse
+import os
+import shutil
+import sys
 from pathlib import Path
 
 from download_accompaniment_model import download_accompaniment_model
@@ -101,11 +105,94 @@ def validate_default_transkun_runtime() -> dict[str, object]:
     }
 
 
-def download_sota_models() -> dict[str, object]:
+def _copy_tree(src: Path, dst: Path, label: str) -> bool:
+    if not src.exists():
+        return False
+    if src.is_dir():
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in src.iterdir():
+            target = dst / item.name
+            if item.is_dir():
+                if target.exists() and target.is_file():
+                    target.unlink()
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    print(f"copied local {label}: {src} -> {dst}")
+    return True
+
+
+def copy_models_from_source(source_dir: str | Path) -> Path:
+    source = Path(source_dir).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Model source directory not found: {source}")
+    home = Path.home()
+    cache_root = home / ".cache" / "music_ai_models"
+    music_models = home / ".music-to-midi" / "models"
+    repo = Path(__file__).resolve().parent
+
+    mappings = [
+        (["aria_amt"], cache_root / "aria_amt", "Aria-AMT"),
+        (["bytedance_piano"], cache_root / "bytedance_piano", "ByteDance Piano"),
+        (["transkun_v2_aug"], cache_root / "transkun_v2_aug", "TransKun V2 Aug"),
+        (["yourmt3_all", "yourmt3"], cache_root / "yourmt3_all", "YourMT3+"),
+        (["audio-separator", "audio_separator"], music_models / "audio-separator", "audio-separator models"),
+        (["beat_this"], music_models / "beat_this", "Beat This"),
+        (["chordmini"], music_models / "chordmini", "ChordMini"),
+        (["muscriptor_small"], repo / "models" / "muscriptor_small", "MuScriptor-small"),
+        (["muscriptor_medium"], repo / "models" / "muscriptor_medium", "MuScriptor-medium"),
+        (["muscriptor_large"], repo / "models" / "muscriptor_large", "MuScriptor-large"),
+        (["muscriptor_assets"], repo / "models" / "muscriptor_assets", "MuScriptor assets"),
+    ]
+    for names, dst, label in mappings:
+        for name in names:
+            src = source / name
+            if src.exists():
+                _copy_tree(src, dst, label)
+                break
+
+    for name in ["ai4m-miros", "miros", "MIROS"]:
+        src = source / name
+        if src.exists():
+            _copy_tree(src, repo / "external" / "ai4m-miros", "MIROS source/weights")
+            _copy_tree(src, repo / "ai4m-miros", "MIROS source/weights (root)")
+            break
+
+    for name in ["fluidsynth", "musescore"]:
+        src = source / name
+        if src.exists():
+            _copy_tree(src, repo / "tools" / name, name)
+
+    print(f"Local model copy completed from: {source}")
+    return source
+
+
+def _muscriptor_assets_locally_ready() -> bool:
+    try:
+        from src.utils.muscriptor_downloader import get_cached_muscriptor_paths
+        from src.utils.muscriptor_soundfont_downloader import is_muscriptor_soundfont_available
+        for model_size in MuscriptorModel:
+            get_cached_muscriptor_paths(model_size, validate_hashes=True)
+        return bool(is_muscriptor_soundfont_available())
+    except Exception:
+        return False
+
+
+def download_sota_models(model_source_dir: str | Path | None = None) -> dict[str, object]:
     """Prepare the full SOTA model set used by the app's public workflows."""
-    print("Preflighting all gated MuScriptor checkpoint permissions...")
-    preflight_muscriptor_download_access()
-    print("All gated MuScriptor checkpoint permissions are ready.")
+    if model_source_dir:
+        copy_models_from_source(model_source_dir)
+
+    if model_source_dir and _muscriptor_assets_locally_ready():
+        print("Local MuScriptor checkpoints/assets detected; skipping gated Hugging Face preflight.")
+    else:
+        print("Preflighting all gated MuScriptor checkpoint permissions...")
+        preflight_muscriptor_download_access()
+        print("All gated MuScriptor checkpoint permissions are ready.")
     print("")
 
     print("Preparing exact TransKun 2.0.1 package and built-in V2 resources...")
@@ -235,5 +322,16 @@ def download_sota_models() -> dict[str, object]:
     }
 
 
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Download/copy and validate SOTA models")
+    parser.add_argument(
+        "--model-source-dir",
+        default=None,
+        help="Copy model files from this local directory instead of downloading when possible.",
+    )
+    args = parser.parse_args(argv)
+    download_sota_models(model_source_dir=args.model_source_dir)
+
+
 if __name__ == "__main__":
-    download_sota_models()
+    main()
